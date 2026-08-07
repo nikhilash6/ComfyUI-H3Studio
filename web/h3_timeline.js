@@ -444,15 +444,23 @@ function attachTimeline(node) {
     }
 
     function cachedImg(name) {
-        const url = inputFileUrl(name);
+        // display copies come through the server's preview re-encoder: a 7680px
+        // wallpaper PNG is tens of MB raw but ~1–2MB as same-resolution webp, so
+        // thumbs appear in a fraction of the time. Framing coords are normalized
+        // and python always reads the original file — nothing downstream changes.
+        const url = inputFileUrl(name) + "&preview=webp;90";
         let img = state.imgCache.get(url);
         if (!img) {
             img = new Image();
             img.onload = () => { state.fs?.fill?.(); renderSummary(); };
+            img.onerror = () => { img._h3Failed = true; state.fs?.fill?.(); renderSummary(); };
             img.src = url;
             state.imgCache.set(url, img);
         }
         return img.naturalWidth > 0 ? img : null;
+    }
+    function cachedImgFailed(name) {
+        return !!state.imgCache.get(inputFileUrl(name) + "&preview=webp;90")?._h3Failed;
     }
 
     // ---- widget <-> state sync -------------------------------------------
@@ -888,11 +896,23 @@ function attachTimeline(node) {
             });
             return im;
         }
-        return el("div", {
+        const ph = el("div", {
             width: w + "px", height: h + "px", borderRadius: "4px", background: "#222",
             display: "flex", alignItems: "center", justifyContent: "center",
             color: "#666", fontSize: "11px", fontFamily: "monospace",
         }, label || "no preview");
+        if ((label || "").includes("loading")) {
+            // big files decode for a while — a static label reads as "stuck"
+            if (!document.getElementById("h3-timeline-css")) {
+                const st = document.createElement("style");
+                st.id = "h3-timeline-css";
+                st.textContent = "@keyframes h3pulse{0%{opacity:.35}50%{opacity:1}100%{opacity:.35}}";
+                document.head.appendChild(st);
+            }
+            ph.style.animation = "h3pulse 1.2s ease-in-out infinite";
+            ph.textContent = "⏳ " + label;
+        }
+        return ph;
     }
 
     function picChip(n, color) {
@@ -1187,6 +1207,61 @@ function attachTimeline(node) {
             } else {
                 toast("image replaced — placement, strength and settings kept");
             }
+        });
+    }
+
+    // ---- final-frame extraction: chain from any footage in one click --------
+    // Decodes the video's last frame in the browser, uploads it as a PNG and
+    // hands back the input-folder name. File videos only (sockets have no URL).
+    function extractLastFrame(name, onDone) {
+        toast("extracting final frame…");
+        const vv = document.createElement("video");
+        vv.muted = true;
+        vv.preload = "auto";
+        vv.src = inputFileUrl(name);
+        const stop = () => { vv.removeAttribute("src"); vv.load(); };
+        const fail = (why) => {
+            stop();
+            toast("could not extract the final frame — " + why
+                + ". Graph fallback: Load Video → Get Video Components → Image From Batch.", true);
+        };
+        vv.addEventListener("error", () => fail("the browser can't decode this file"));
+        vv.addEventListener("loadedmetadata", () => {
+            if (!isFinite(vv.duration) || vv.duration <= 0) return fail("no duration reported");
+            // a hair before the end: seeking to exactly duration can land past
+            // the last decodable frame in some containers
+            vv.currentTime = Math.max(0, vv.duration - 0.001);
+        }, { once: true });
+        vv.addEventListener("seeked", async () => {
+            try {
+                if (!vv.videoWidth) return fail("no video track");
+                const cnv = document.createElement("canvas");
+                cnv.width = vv.videoWidth;
+                cnv.height = vv.videoHeight;
+                cnv.getContext("2d").drawImage(vv, 0, 0);
+                const blob = await new Promise((res, rej) =>
+                    cnv.toBlob((b) => b ? res(b) : rej(new Error("frame not decodable")), "image/png"));
+                const base = name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop().replace(/\.[^.]+$/, "");
+                const fname = await uploadBlob(blob, `h3-final-${base}.png`, true);
+                stop();
+                onDone(fname);
+            } catch (e) {
+                fail(e.message);
+            }
+        }, { once: true });
+    }
+
+    function finalFrameToFirst(videoName) {
+        extractLastFrame(videoName, (fname) => {
+            setWidget("first_frame_file", fname);
+            setWidget("first_frame_crop", "");   // old image's framing doesn't apply
+            refresh(true);
+            const [oW, oH] = outWH();
+            const meta = state.videoMeta.get(videoName);
+            const mismatch = meta && Math.abs(meta.w / meta.h - oW / oH) > 0.01;
+            toast(`final frame set as first frame (${fname})`
+                + (mismatch ? " — aspect differs from the output, ⛶ it on the first-frame card" : ""),
+                !!mismatch);
         });
     }
 
@@ -2396,7 +2471,9 @@ function attachTimeline(node) {
             const entCrop = entity.kind === "mid" ? state.midCrops[entity.i]
                 : (entity.kind === "first" ? state.firstCrop : state.lastCrop);
             const th = thumbEl(entity.img, 176, 99,
-                entity.connected ? "socket — run to preview" : "loading…", entCrop, outWH());
+                entity.connected ? "socket — run to preview"
+                    : (entity.file && cachedImgFailed(entity.file) ? "⚠ couldn't load" : "loading…"),
+                entCrop, outWH());
             const foot = el("div", { padding: "6px 8px", display: "flex", flexDirection: "column", gap: "3px" });
             const row1 = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center" });
             row1.append(
@@ -2482,7 +2559,9 @@ function attachTimeline(node) {
                 opacity: state.refsAuto ? "0.8" : "1",
             });
             const th = thumbEl(refImg(r), 136, 136,
-                r.src.type === "socket" ? "socket" : "loading…", state.refCrops[i], null);
+                r.src.type === "socket" ? "socket"
+                    : (cachedImgFailed(r.src.name) ? "⚠ couldn't load" : "loading…"),
+                state.refCrops[i], null);
             const foot = el("div", { padding: "6px 8px", display: "flex", flexDirection: "column", gap: "4px" });
             const row1 = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center" });
             const frB = el("button", { ...btnStyle, padding: "0 6px", fontSize: "11px",
@@ -3254,10 +3333,34 @@ function attachTimeline(node) {
                     row3.appendChild(el("span", { color: COL.green, fontSize: "10px" },
                         "⛶ " + state.videoCrops[i].z.toFixed(2) + "×"));
                 if (v.src.type === "file") {
+                    const ff = el("button", { ...btnStyle, padding: "0 6px", fontSize: "11px" }, "⏭");
+                    ff.title = "use this video's FINAL frame as the clip's first frame — continue the footage exactly";
+                    ff.addEventListener("click", (ev) => { ev.stopPropagation(); finalFrameToFirst(v.src.name); });
+                    row3.appendChild(ff);
                     const x = el("button", { ...btnStyle, color: COL.red, padding: "0 6px", fontSize: "11px" }, "✕");
                     x.addEventListener("click", () => removeFileVideo(i));
                     row3.appendChild(x);
                 }
+                c.addEventListener("contextmenu", (ev) => {
+                    ev.preventDefault();
+                    const isFile = v.src.type === "file";
+                    const items = [
+                        { label: "⏭ final frame → first frame", hint: "continue this footage",
+                          disabled: !isFile, ...(isFile ? {} : { hint: "fed by graph socket" }),
+                          action: () => finalFrameToFirst(v.src.name) },
+                        { label: state.videoCrops[i] ? "⛶ adjust framing…" : "⛶ frame video…",
+                          hint: state.videoCrops[i] ? state.videoCrops[i].z.toFixed(2) + "×" : "",
+                          disabled: !isFile, action: () => openFramer({ kind: "video", i }) },
+                    ];
+                    if (state.videoCrops[i])
+                        items.push({ label: "⛶ clear framing",
+                            action: () => { setCropOf({ kind: "video", i }, null); refresh(true); } });
+                    items.push("-");
+                    items.push({ label: "✕ remove", danger: true, disabled: !isFile,
+                        ...(isFile ? {} : { hint: "disconnect in the graph" }),
+                        action: () => removeFileVideo(i) });
+                    openCtxMenu(ev.clientX, ev.clientY, items);
+                });
                 foot.append(row1, slider, row3);
                 c.append(foot);
                 vidRow.appendChild(c);

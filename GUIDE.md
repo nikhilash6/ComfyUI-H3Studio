@@ -29,7 +29,7 @@ Add their photos with **+ reference** (strength `1.0` locks identity, `0.7` = li
 Set the first frame from the picker's **output folder** tab (newest first) — grab the last frame of the previous clip. Add the previous clip as a video reference if you also want its momentum.
 
 ### I want to continue an external video file (from my drive, someone else's render…)
-Get it into ComfyUI first: **+ video…** → **upload…** (any file on disk), or just drag it from Explorer onto the VIDEO REFERENCES section — that carries its look, motion and sound. For pixel-exact continuation also pin the first frame to the video's final frame: `Load Video → Get Video Components → Image From Batch` (last index) → the node's `first_frame` socket. Different aspect? Fix it with **⛶** on the video card.
+**+ video…** → **upload…** (any file on disk), or drag it from Explorer onto the VIDEO REFERENCES section — that carries its look, motion and sound. Then click **⏭** on the video's card: its **final frame becomes the clip's first frame**, one click, done. Different aspect? The toast tells you — **⛶** the first-frame card. (Graph alternative: `Load Video → Get Video Components → Image From Batch` → `first_frame` socket.)
 
 ### I want to fix a wrong crop / aspect mismatch
 Every image and video card has **⛶** — drag/zoom the window over what the model should see. Keyframes are locked to the output aspect, refs/videos keep their own. Corner-drag for exact size, wheel to zoom (Shift = fine), scrub bar on videos.

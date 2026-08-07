@@ -89,9 +89,12 @@ function imageUrl(value) {
         subfolder = name.substring(0, slash);
         name = name.substring(slash + 1);
     }
+    // preview=webp re-encodes server-side at the SAME resolution: a huge
+    // wallpaper PNG arrives in a fraction of the time. The node's python path
+    // still reads the original file, so output quality is untouched.
     return api.apiURL(
         `/view?filename=${encodeURIComponent(name)}&type=${type}` +
-        `&subfolder=${encodeURIComponent(subfolder)}&t=${Date.now()}`
+        `&subfolder=${encodeURIComponent(subfolder)}&preview=webp;95&t=${Date.now()}`
     );
 }
 
@@ -225,6 +228,10 @@ function attachFramingCanvas(node) {
         if (state.loadedFor === value && state.img) { render(); return; }
         const url = imageUrl(value);
         if (!url) return;
+        // big files take a moment even as webp — say so instead of sitting blank
+        state.img = null;
+        state.error = "loading…";
+        render();
         const img = new Image();
         const want = value;   // a slow earlier load must not clobber a later pick
         img.onload = () => {
