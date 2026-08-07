@@ -5,6 +5,8 @@
 
 **MiniMax H3 first/last-frame conditioning with an independent strength dial on each keyframe — so they steer the motion instead of pinning it.**
 
+> **In a hurry? Read the [Quick recipes guide](GUIDE.md)** — every feature as a one-breath "I want to…" answer. This README is the deep reference.
+
 ## What it does
 
 Drop-in duplicate of ComfyUI's stock **MiniMax H3 Image to Video** node with two
