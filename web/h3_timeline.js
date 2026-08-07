@@ -2518,6 +2518,33 @@ function attachTimeline(node) {
                 row3.appendChild(x);
             } else row3.appendChild(el("span", { color: "#555", fontSize: "10px" }, "via graph"));
             foot.append(row1, row2, row3);
+            // unframed + aspect mismatch = silent distortion at encode time
+            // (first frame stretches, waypoints/last center-crop — core's own
+            // conventions). Announce it and make the fix one click.
+            if (!entCrop && entity.img?.naturalWidth) {
+                const [oW, oH] = outWH();
+                const ia = entity.img.naturalWidth / entity.img.naturalHeight;
+                if (Math.abs(ia / (oW / oH) - 1) > 0.02) {
+                    const warn = el("div", {
+                        color: COL.mid, fontSize: "10px", cursor: "pointer",
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                    }, entity.kind === "first"
+                        ? "⚠ aspect differs — will STRETCH · ⛶ to choose"
+                        : "⚠ aspect differs — will edge-crop · ⛶ to choose");
+                    warn.title = "this image is "
+                        + entity.img.naturalWidth + "×" + entity.img.naturalHeight
+                        + " but the clip is " + oW + "×" + oH + " — without a framing the model "
+                        + (entity.kind === "first"
+                            ? "stretches it to fit (squish)."
+                            : "center-crops it (edges lost).")
+                        + " Click to frame it yourself.";
+                    warn.addEventListener("click", (ev) => {
+                        ev.stopPropagation();
+                        openFramer(entity.kind === "mid" ? { kind: "mid", i: entity.i } : { kind: entity.kind });
+                    });
+                    foot.appendChild(warn);
+                }
+            }
             if (entity.kind === "mid" && entity.desc)
                 foot.appendChild(el("div", {
                     color: COL.text, fontSize: "11px", whiteSpace: "nowrap",
