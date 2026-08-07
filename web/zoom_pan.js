@@ -89,12 +89,13 @@ function imageUrl(value) {
         subfolder = name.substring(0, slash);
         name = name.substring(slash + 1);
     }
-    // preview=webp re-encodes server-side at the SAME resolution: a huge
-    // wallpaper PNG arrives in a fraction of the time. The node's python path
-    // still reads the original file, so output quality is untouched.
+    // the pack's preview endpoint re-encodes server-side at the SAME resolution
+    // (a huge wallpaper PNG arrives in a fraction of the time) AND applies
+    // EXIF orientation, matching this node's python loader. Raw /view fallback
+    // lives in loadImage. Python still reads the original file.
     return api.apiURL(
-        `/view?filename=${encodeURIComponent(name)}&type=${type}` +
-        `&subfolder=${encodeURIComponent(subfolder)}&preview=webp;95&t=${Date.now()}`
+        `/h3guide/preview?filename=${encodeURIComponent(name)}&type=${type}` +
+        `&subfolder=${encodeURIComponent(subfolder)}&t=${Date.now()}`
     );
 }
 
@@ -243,6 +244,19 @@ function attachFramingCanvas(node) {
         };
         img.onerror = () => {
             if (widgetValue(node, "image", null) !== want) return;
+            if (!img._h3Raw) {
+                // preview endpoint refused it — the raw file may still decode
+                // (browser applies EXIF itself on raw URLs, so parity holds)
+                img._h3Raw = true;
+                let raw = value, rtype = "input", rsub = "";
+                const ann = /^(.*)\s*\[(\w+)\]\s*$/.exec(raw);
+                if (ann) { raw = ann[1].trim(); rtype = ann[2]; }
+                const slash = raw.lastIndexOf("/");
+                if (slash > -1) { rsub = raw.substring(0, slash); raw = raw.substring(slash + 1); }
+                img.src = api.apiURL(`/view?filename=${encodeURIComponent(raw)}&type=${rtype}` +
+                    `&subfolder=${encodeURIComponent(rsub)}&t=${Date.now()}`);
+                return;
+            }
             state.img = null;
             state.error = "could not load image";
             render();

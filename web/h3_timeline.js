@@ -274,6 +274,19 @@ function inputFileUrl(name) {
         `&subfolder=${encodeURIComponent(subfolder)}`);
 }
 
+function previewFileUrl(name) {
+    // same name resolution as inputFileUrl, but through the pack's own preview
+    // endpoint: core's /view?preview strips EXIF orientation, ours transposes
+    // first so the display agrees with what python actually loads
+    let filename = name, type = "input", subfolder = "";
+    const ann = /^(.*?)\s*\[(input|output|temp)\]\s*$/.exec(filename);
+    if (ann) { filename = ann[1].trim(); type = ann[2]; }
+    const slash = filename.lastIndexOf("/");
+    if (slash > -1) { subfolder = filename.slice(0, slash); filename = filename.slice(slash + 1); }
+    return api.apiURL(`/h3guide/preview?filename=${encodeURIComponent(filename)}&type=${type}` +
+        `&subfolder=${encodeURIComponent(subfolder)}`);
+}
+
 function connectedSlots(node, prefix) {
     const out = [];
     for (const inp of node.inputs || []) {
@@ -446,30 +459,39 @@ function attachTimeline(node) {
     }
 
     function cachedImg(name) {
-        // display copies come through the server's preview re-encoder: a 7680px
-        // wallpaper PNG is tens of MB raw but ~1–2MB as same-resolution webp, so
-        // thumbs appear in a fraction of the time. Framing coords are normalized
-        // and python always reads the original file — nothing downstream changes.
-        const url = inputFileUrl(name) + "&preview=webp;90";
+        // display copies come through the pack's preview endpoint: a 7680px
+        // wallpaper PNG is tens of MB raw but ~1–2MB as same-resolution webp
+        // (EXIF-transposed, so orientation matches the python loader). If the
+        // preview 500s, fall back to the raw file before declaring failure.
+        const url = previewFileUrl(name);
         let img = state.imgCache.get(url);
         if (!img) {
             img = new Image();
             img.onload = () => { state.fs?.fill?.(); renderSummary(); };
-            img.onerror = () => { img._h3Failed = true; state.fs?.fill?.(); renderSummary(); };
+            img.onerror = () => {
+                if (!img._h3Raw) {
+                    img._h3Raw = true;
+                    img.src = inputFileUrl(name);   // raw: browser applies EXIF itself
+                } else {
+                    img._h3Failed = true;
+                    state.fs?.fill?.(); renderSummary();
+                }
+            };
             img.src = url;
             state.imgCache.set(url, img);
         }
         return img.naturalWidth > 0 ? img : null;
     }
     function cachedImgFailed(name) {
-        return !!state.imgCache.get(inputFileUrl(name) + "&preview=webp;90")?._h3Failed;
+        return !!state.imgCache.get(previewFileUrl(name))?._h3Failed;
     }
 
     function ensureVideoMeta(name) {
         // videoMeta is normally filled by the reference-video cards; the v2v bar
         // needs dims for footage that has no card. undefined = not started,
         // null = loading, object = known.
-        if (state.videoMeta.get(name) !== undefined) return state.videoMeta.get(name);
+        const have = state.videoMeta.get(name);
+        if (have !== undefined) return (have && have.w) ? have : null;
         state.videoMeta.set(name, null);
         const vv = document.createElement("video");
         vv.muted = true;
@@ -478,6 +500,12 @@ function attachTimeline(node) {
         vv.addEventListener("loadedmetadata", () => {
             state.videoMeta.set(name, { dur: vv.duration, w: vv.videoWidth, h: vv.videoHeight });
             vv.removeAttribute("src"); vv.load();
+            state.fs?.fill?.();
+        }, { once: true });
+        vv.addEventListener("error", () => {
+            // marked failed (not deleted): consumers treat it as no-meta, and the
+            // card path below may still overwrite it with a successful read
+            state.videoMeta.set(name, { failed: true });
             state.fs?.fill?.();
         }, { once: true });
         return null;
@@ -579,6 +607,33 @@ function attachTimeline(node) {
         if (!state.videoSpecError)   // error state: crop array length is not authoritative
             setWidget("ref_video_crops", state.videoCrops.some(Boolean)
                 ? formatCropSpec(state.videoCrops) : "");
+    }
+
+    // banker's-rounded 32 grid — MUST mirror python's round(x/32)*32
+    function snap32(v) {
+        const q = v / 32, f = Math.floor(q), d = q - f;
+        const r = d > 0.5 ? f + 1 : d < 0.5 ? f : (f % 2 === 0 ? f : f + 1);
+        return Math.max(32, r * 32);
+    }
+
+    // the canvas conditioning actually conforms to: the widgets normally, but
+    // with v2v active the footage (or the framed window) takes over — python
+    // overrides width/height, so warnings and framers must use the same truth.
+    // Returns null when the canvas is unknowable client-side (socket footage,
+    // dims still loading) — callers should stay silent rather than guess.
+    function effWH() {
+        const vf = String(widgetValue(node, "v2v_video_file", "")).trim();
+        const vSock = inputConnected(node, "v2v_images");
+        if (!vSock && !vf) return outWH();
+        if (cropOf({ kind: "v2v" })) {
+            const [w, h] = outWH();
+            return [snap32(w), snap32(h)];
+        }
+        if (vf) {
+            const m = state.videoMeta.get(vf);
+            if (m?.w) return [snap32(m.w), snap32(m.h)];
+        }
+        return null;
     }
 
     // canvas aspect for keyframe crop windows — the whole point: what the model
@@ -1270,6 +1325,9 @@ function attachTimeline(node) {
                     cnv.toBlob((b) => b ? res(b) : rej(new Error("frame not decodable")), "image/png"));
                 const base = name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop().replace(/\.[^.]+$/, "");
                 const fname = await uploadBlob(blob, `h3-final-${base}.png`, true);
+                // deterministic name + overwrite: a cached thumb would show the OLD frame
+                state.imgCache.delete(previewFileUrl(fname));
+                state.imgCache.delete(inputFileUrl(fname));
                 stop();
                 onDone(fname);
             } catch (e) {
@@ -1279,6 +1337,10 @@ function attachTimeline(node) {
     }
 
     function finalFrameToFirst(videoName) {
+        if (inputConnected(node, "first_frame")) {
+            toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph, then press ⏭ again", true);
+            return;
+        }
         extractLastFrame(videoName, (fname) => {
             setWidget("first_frame_file", fname);
             setWidget("first_frame_crop", "");   // old image's framing doesn't apply
@@ -1655,11 +1717,18 @@ function attachTimeline(node) {
         }
         if (!img) { openModal((r) => r.appendChild(el("div", { color: COL.text, fontSize: "13px" },
             "No preview available to frame — socket inputs need a prior run (file-picked ones frame instantly)."))); return; }
+        if (isVideo && _media && !_media.videoWidth) {
+            // re-entry after the wait, but the source vanished or never decoded
+            _media.removeAttribute("src"); _media.load();
+            toast("couldn't read that footage (removed, or a codec the browser can't decode)", true);
+            return;
+        }
         if (isVideo && !img.videoWidth) {
             // metadata never exists synchronously after src-set: hand the SAME
             // element back to ourselves once it's ready (recursing without it
             // created a fresh 0-width element every cycle — an infinite loop)
             img.addEventListener("loadedmetadata", () => openFramer(sel, img), { once: true });
+            img.addEventListener("error", () => openFramer(sel, img), { once: true });
             return;
         }
         // normalize media dims: <video> exposes videoWidth/Height, <img> natural*
@@ -1668,7 +1737,8 @@ function attachTimeline(node) {
             Object.defineProperty(img, "naturalHeight", { value: img.videoHeight });
         }
 
-        const [ow, oh] = isRef ? [img.naturalWidth, img.naturalHeight] : outWH();
+        const [ow, oh] = isRef ? [img.naturalWidth, img.naturalHeight]
+            : (sel.kind === "v2v" ? outWH().map(snap32) : (effWH() || outWH()));
         let crop = cropOf(sel) || { cx: 0.5, cy: 0.5, z: 1.0 };
 
         openModal((root) => {
@@ -2219,6 +2289,7 @@ function attachTimeline(node) {
             setWidget("v2v_video_file", "");
             setWidget("v2v_start_seconds", 0);
             setWidget("v2v_end_seconds", 0);
+            setWidget("v2v_crop", "");   // a framing must not outlive its footage
             refresh(true);
         });
         const v2vNote = el("span", { fontSize: "11px", display: "none", whiteSpace: "nowrap" });
@@ -2227,7 +2298,24 @@ function attachTimeline(node) {
         v2vScrub.addEventListener("click", () => openV2vSection());
         const v2vFrame = el("button", btnStyle, "⛶");
         v2vFrame.title = "frame the footage: window locked to the width×height widgets — the restyled clip becomes exactly that canvas (reframe landscape into vertical, etc.)";
-        v2vFrame.addEventListener("click", () => openFramer({ kind: "v2v" }));
+        v2vFrame.addEventListener("click", () => {
+            const vSock = inputConnected(node, "v2v_images");
+            if (vSock) {
+                // no preview to frame — offer a two-click clear of the stale crop
+                if (v2vFrame.dataset.confirm === "1") {
+                    delete v2vFrame.dataset.confirm;
+                    setWidget("v2v_crop", "");
+                    refresh(true);
+                    toast("v2v framing cleared — canvas follows the socket footage again");
+                } else {
+                    v2vFrame.dataset.confirm = "1";
+                    toast("a v2v framing is set but socket footage can't be previewed — click ⛶ again to CLEAR it", true);
+                }
+                return;
+            }
+            delete v2vFrame.dataset.confirm;
+            openFramer({ kind: "v2v" });
+        });
         const v2vDenoise = el("span", {
             color: COL.mid, fontSize: "12px", display: "none", whiteSpace: "nowrap",
         }, "→ set denoise 0.3–0.7 on your KSampler");
@@ -2324,6 +2412,9 @@ function attachTimeline(node) {
                 strip.addEventListener("pointermove", (ev) => { if (ev.buttons) seekTo(ev); });
                 vv.addEventListener("timeupdate", paint);
                 vv.addEventListener("loadedmetadata", paint);
+                vv.addEventListener("error", () => {
+                    readout.textContent = "couldn't decode this footage in the browser — set the section by typing seconds instead";
+                });
                 playB.addEventListener("click", () => {
                     if (vv.paused) { vv.play(); playB.textContent = "⏸"; }
                     else { vv.pause(); playB.textContent = "▶"; }
@@ -2337,6 +2428,12 @@ function attachTimeline(node) {
                 });
                 outB.addEventListener("click", () => {
                     const t = Math.round(vv.currentTime * 10) / 10;
+                    if (t < 0.1) {
+                        // 0 is the "to the end" sentinel — an out-point here would
+                        // silently select the whole clip
+                        readout.textContent = "scrub forward first — an end point at 0s would mean 'to the end'";
+                        return;
+                    }
                     setWidget("v2v_end_seconds", t);
                     if (getS() >= t) setWidget("v2v_start_seconds", 0);
                     paint(); refresh(false);
@@ -2684,8 +2781,8 @@ function attachTimeline(node) {
             // unframed + aspect mismatch = silent distortion at encode time
             // (first frame stretches, waypoints/last center-crop — core's own
             // conventions). Announce it and make the fix one click.
-            if (!entCrop && entity.img?.naturalWidth) {
-                const [oW, oH] = outWH();
+            if (!entCrop && entity.img?.naturalWidth && effWH()) {
+                const [oW, oH] = effWH();
                 const ia = entity.img.naturalWidth / entity.img.naturalHeight;
                 if (Math.abs(ia / (oW / oH) - 1) > 0.02) {
                     const warn = el("div", {
@@ -3403,27 +3500,28 @@ function attachTimeline(node) {
                 // widgets) — UNLESS a ⛶ framing pins it back to width×height.
                 // Surface whichever is true instead of letting w/h fields mislead.
                 const v2vCrop = cropOf({ kind: "v2v" });
-                v2vScrub.style.display = v2vFrame.style.display = (!vSock && vf) ? "" : "none";
+                v2vScrub.style.display = (!vSock && vf) ? "" : "none";
+                // socket footage can't be framed here (no preview), but a crop
+                // set earlier STILL applies python-side — keep ⛶ visible as a
+                // two-click clear so it can never pin the canvas invisibly
+                v2vFrame.style.display = ((!vSock && vf) || (vSock && v2vCrop)) ? "" : "none";
                 v2vFrame.style.color = v2vCrop ? COL.green : COL.bright;
                 v2vDenoise.style.display = active ? "" : "none";
                 v2vNote.style.display = active ? "" : "none";
-                if (vSock) {
+                if (active && v2vCrop) {
+                    v2vNote.style.color = COL.green;
+                    v2vNote.textContent = `· canvas = your ⛶ window → ${snap32(oW)}×${snap32(oH)}`;
+                    v2vNote.title = "framed v2v: the footage is windowed to the width×height aspect and resized to exactly that canvas";
+                } else if (vSock) {
                     v2vNote.style.color = COL.text;
                     v2vNote.textContent = "· canvas + length follow the footage (w/h/length widgets ignored)";
-                } else if (active && v2vCrop) {
-                    v2vNote.style.color = COL.green;
-                    v2vNote.textContent = `· canvas = your ⛶ window → ${oW}×${oH}`;
-                    v2vNote.title = "framed v2v: the footage is windowed to the width×height aspect and resized to exactly that canvas";
                 } else if (active) {
                     const meta = ensureVideoMeta(vf);
-                    if (meta) {
-                        // python: max(32, round(x/32)*32) with banker's rounding
-                        const r32 = (v) => {
-                            const q = v / 32, f2 = Math.floor(q), d = q - f2;
-                            const r = d > 0.5 ? f2 + 1 : d < 0.5 ? f2 : (f2 % 2 === 0 ? f2 : f2 + 1);
-                            return Math.max(32, r * 32);
-                        };
-                        const fw = r32(meta.w), fh = r32(meta.h);
+                    if (state.videoMeta.get(vf)?.failed) {
+                        v2vNote.style.color = COL.mid;
+                        v2vNote.textContent = "· couldn't read the footage dims (codec?) — canvas follows footage";
+                    } else if (meta) {
+                        const fw = snap32(meta.w), fh = snap32(meta.h);
                         const differs = fw !== oW || fh !== oH;
                         v2vNote.style.color = differs ? COL.mid : COL.text;
                         v2vNote.textContent = differs
@@ -3507,7 +3605,8 @@ function attachTimeline(node) {
                     vv.src = inputFileUrl(v.src.name);
                     Object.assign(vv.style, { width: "180px", height: "101px", objectFit: "cover", background: "#222", display: "block" });
                     vv.addEventListener("loadedmetadata", () => {
-                        if (!state.videoMeta.has(v.src.name)) {
+                        const cur = state.videoMeta.get(v.src.name);
+                        if (!cur || !cur.w) {   // fill placeholders/failures too
                             state.videoMeta.set(v.src.name,
                                 { dur: vv.duration, w: vv.videoWidth, h: vv.videoHeight });
                             updateCostMeter();
@@ -3592,9 +3691,9 @@ function attachTimeline(node) {
                 // aspect-preserving) — but an unwindowed off-aspect video means the
                 // model studies the full frame, which may not be the region you care
                 // about when continuing footage
-                if (v.src.type === "file" && !state.videoCrops[i]) {
+                if (v.src.type === "file" && !state.videoCrops[i] && effWH()) {
                     const meta = state.videoMeta.get(v.src.name);
-                    if (meta && Math.abs((meta.w / meta.h) / (outWH()[0] / outWH()[1]) - 1) > 0.02) {
+                    if (meta?.w && Math.abs((meta.w / meta.h) / (effWH()[0] / effWH()[1]) - 1) > 0.02) {
                         const info = el("div", {
                             color: COL.text, fontSize: "10px", cursor: "pointer",
                             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",

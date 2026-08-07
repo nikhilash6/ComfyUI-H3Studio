@@ -14,6 +14,13 @@ except Exception as exc:  # never let a compat shim break the pack's own load
     logging.warning("MiniMaxH3Guide: turbo compatibility shim skipped (%s: %s)",
                     type(exc).__name__, exc)
 
+# orientation-correct thumbnail endpoint (no-op headless)
+try:
+    from . import h3_preview  # noqa: F401  (registers its route at import)
+except Exception as exc:
+    logging.warning("MiniMaxH3Guide: preview endpoint skipped (%s: %s)",
+                    type(exc).__name__, exc)
+
 WEB_DIRECTORY = "./web"
 
 __all__ = ["comfy_entrypoint", "WEB_DIRECTORY"]
