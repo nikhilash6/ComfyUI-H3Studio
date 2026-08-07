@@ -752,6 +752,15 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             from .h3_v2v import build_v2v_latent
             latent, frame_count = build_v2v_latent(vae, audio_vae, frames_sel, snd_sel,
                                                    FPS_HINT, 0.0, "v2v source")
+            # the footage defines the canvas: keyframes, crop windows and 'match'
+            # ref sizing must all conform to IT, or their spatial rope grids
+            # misalign with the video rows they anchor to
+            vshape = latent["samples"].tensors[0].shape
+            fw, fh = vshape[-1] * 16, vshape[-2] * 16
+            if (fw, fh) != (width, height):
+                logging.info("MiniMaxH3Guide: v2v canvas follows the footage: %dx%d "
+                             "(width/height widgets %dx%d ignored).", fw, fh, width, height)
+            width, height = fw, fh
             logging.info("MiniMaxH3Guide: v2v source active -- clip length follows the "
                          "footage (%d frames, %.1fs); the length widget is ignored. "
                          "Sample at denoise 0.3-0.7 to restyle.",

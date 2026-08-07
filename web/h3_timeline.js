@@ -463,6 +463,24 @@ function attachTimeline(node) {
         return !!state.imgCache.get(inputFileUrl(name) + "&preview=webp;90")?._h3Failed;
     }
 
+    function ensureVideoMeta(name) {
+        // videoMeta is normally filled by the reference-video cards; the v2v bar
+        // needs dims for footage that has no card. undefined = not started,
+        // null = loading, object = known.
+        if (state.videoMeta.get(name) !== undefined) return state.videoMeta.get(name);
+        state.videoMeta.set(name, null);
+        const vv = document.createElement("video");
+        vv.muted = true;
+        vv.preload = "metadata";
+        vv.src = inputFileUrl(name);
+        vv.addEventListener("loadedmetadata", () => {
+            state.videoMeta.set(name, { dur: vv.duration, w: vv.videoWidth, h: vv.videoHeight });
+            vv.removeAttribute("src"); vv.load();
+            state.fs?.fill?.();
+        }, { once: true });
+        return null;
+    }
+
     // ---- widget <-> state sync -------------------------------------------
     function pullFromWidgets() {
         const F = fc();
@@ -2188,7 +2206,9 @@ function attachTimeline(node) {
             setWidget("v2v_end_seconds", 0);
             refresh(true);
         });
-        v2vBar.append(v2vLabel, el("span", { color: COL.text, fontSize: "11px" }, "section"),
+        const v2vNote = el("span", { fontSize: "11px", display: "none", whiteSpace: "nowrap" });
+        v2vBar.append(v2vLabel, v2vNote,
+            el("span", { color: COL.text, fontSize: "11px" }, "section"),
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"), v2vPick, v2vClear);
 
@@ -3236,6 +3256,33 @@ function attachTimeline(node) {
                     v2vEnd.value = String(Number(widgetValue(node, "v2v_end_seconds", 0)) || 0);
                 v2vStart.disabled = v2vEnd.disabled = !active;
                 if (active) snapNote.textContent = "· length follows v2v footage";
+                // with v2v the FOOTAGE defines the canvas (python overrides the
+                // widgets) — surface that instead of letting w/h fields mislead
+                v2vNote.style.display = active ? "" : "none";
+                if (vSock) {
+                    v2vNote.style.color = COL.text;
+                    v2vNote.textContent = "· canvas + length follow the footage (w/h/length widgets ignored)";
+                } else if (active) {
+                    const meta = ensureVideoMeta(vf);
+                    if (meta) {
+                        // python: max(32, round(x/32)*32) with banker's rounding
+                        const r32 = (v) => {
+                            const q = v / 32, f2 = Math.floor(q), d = q - f2;
+                            const r = d > 0.5 ? f2 + 1 : d < 0.5 ? f2 : (f2 % 2 === 0 ? f2 : f2 + 1);
+                            return Math.max(32, r * 32);
+                        };
+                        const fw = r32(meta.w), fh = r32(meta.h);
+                        const differs = fw !== oW || fh !== oH;
+                        v2vNote.style.color = differs ? COL.mid : COL.text;
+                        v2vNote.textContent = differs
+                            ? `· canvas follows footage → ${fw}×${fh} (w/h widgets ${oW}×${oH} ignored)`
+                            : `· canvas follows footage (${fw}×${fh})`;
+                        v2vNote.title = "keyframes and framing windows conform to the footage canvas while v2v is active";
+                    } else {
+                        v2vNote.style.color = COL.text;
+                        v2vNote.textContent = "· canvas follows the footage (reading dims…)";
+                    }
+                }
             }
             const firstSock = inputConnected(node, "first_frame");
             const lastSock = inputConnected(node, "last_frame");
@@ -3389,6 +3436,27 @@ function attachTimeline(node) {
                     openCtxMenu(ev.clientX, ev.clientY, items);
                 });
                 foot.append(row1, slider, row3);
+                // informational, not a warning: refs are never distorted (sizing is
+                // aspect-preserving) — but an unwindowed off-aspect video means the
+                // model studies the full frame, which may not be the region you care
+                // about when continuing footage
+                if (v.src.type === "file" && !state.videoCrops[i]) {
+                    const meta = state.videoMeta.get(v.src.name);
+                    if (meta && Math.abs((meta.w / meta.h) / (outWH()[0] / outWH()[1]) - 1) > 0.02) {
+                        const info = el("div", {
+                            color: COL.text, fontSize: "10px", cursor: "pointer",
+                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                        }, "aspect differs from clip — model sees full frame · ⛶ to window");
+                        info.title = "this video is " + meta.w + "×" + meta.h + " vs the "
+                            + outWH().join("×") + " clip. No distortion happens (reference sizing "
+                            + "keeps aspect) — but framing it focuses the model on your region.";
+                        info.addEventListener("click", (ev) => {
+                            ev.stopPropagation();
+                            openFramer({ kind: "video", i });
+                        });
+                        foot.appendChild(info);
+                    }
+                }
                 c.append(foot);
                 vidRow.appendChild(c);
             });
