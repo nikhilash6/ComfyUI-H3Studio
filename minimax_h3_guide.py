@@ -183,8 +183,8 @@ def parse_crop_spec(text, count, field="crops"):
     """
     all_lines = file_lines(text)
     if len(all_lines) > count:
-        logging.warning("MiniMaxH3Guide: %s has %d line(s) for %d image(s) -- extra lines "
-                        "ignored; check for a stale crop after removing an image.",
+        logging.warning("MiniMaxH3Guide: %s has %d framing line(s) for %d item(s) -- extra "
+                        "lines ignored; check for a stale framing after removing something.",
                         field, len(all_lines), count)
     out = []
     for i, line in enumerate(all_lines[:count]):
@@ -294,12 +294,14 @@ def weaken_cond_latent_masked(z, strength_map, seed):
     return s * z + torch.sqrt((1.0 - keep * keep).clamp(min=0.0)) * noise
 
 
-def load_input_video(name, field):
+def load_input_video(name, field, max_seconds=REF_VIDEO_MAX_SECONDS):
     """Load a video file from the input/output folder -> (frames [T,H,W,C], audio|None).
 
-    Decodes via comfy's VideoFromFile (PyAV: mp4/webm/mov/mkv all work), resamples
-    to H3's 24 fps by frame index, and caps at the trained 15 s. The embedded
-    soundtrack rides along automatically when present.
+    Decodes via comfy's VideoFromFile (PyAV: mp4/webm/mov/mkv all work) and
+    resamples to H3's 24 fps by frame index. max_seconds caps the result (the
+    trained 15 s for reference videos); None keeps the whole file -- the v2v
+    path needs that, because its section is cut in SOURCE time and may sit past
+    15 s. (Decode is whole-file either way; the cap only trims what we keep.)
     """
     if not folder_paths.exists_annotated_filepath(name):
         raise ValueError("MiniMax H3 Guide: %s names %r, which is not in the input/output "
@@ -310,7 +312,11 @@ def load_input_video(name, field):
         raise ValueError("MiniMax H3 Guide: %r has no video frames." % name)
     fps = float(comp.frame_rate) if comp.frame_rate else float(FPS_HINT)
     duration = frames.shape[0] / max(fps, 1e-6)
-    n_out = min(int(duration * FPS_HINT), REF_VIDEO_MAX_SECONDS * FPS_HINT)
+    n_out = int(duration * FPS_HINT)
+    if max_seconds is not None and n_out > max_seconds * FPS_HINT:
+        n_out = max_seconds * FPS_HINT
+        logging.info("MiniMaxH3Guide: %s %r is %.1fs -- keeping the first %ds "
+                     "(trained reference range).", field, name, duration, max_seconds)
     if n_out < 5:
         raise ValueError("MiniMax H3 Guide: %r is under ~0.2s — reference videos need at "
                          "least 5 frames at 24 fps." % name)
@@ -322,7 +328,8 @@ def load_input_video(name, field):
         if wf.ndim == 2:
             wf = wf.unsqueeze(0)
         sr = comp.audio["sample_rate"]
-        audio = {"waveform": wf[..., :REF_VIDEO_MAX_SECONDS * sr], "sample_rate": sr}
+        keep = None if max_seconds is None else max_seconds * sr
+        audio = {"waveform": wf[..., :keep] if keep else wf, "sample_rate": sr}
     return frames, audio
 
 
@@ -727,7 +734,10 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         if v2v_images is not None:
             v2v_frames, v2v_snd = v2v_images, v2v_audio
         elif v2v_video_file.strip():
-            v2v_frames, v2v_snd = load_input_video(v2v_video_file.strip(), "v2v_video_file")
+            # no 15s cap here: the section is cut in SOURCE time below, so the
+            # scrubbed in/out points must be reachable anywhere in the file
+            v2v_frames, v2v_snd = load_input_video(v2v_video_file.strip(), "v2v_video_file",
+                                                   max_seconds=None)
             if v2v_audio is not None:
                 v2v_snd = v2v_audio
         elif v2v_audio is not None:
@@ -737,10 +747,16 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             total = v2v_frames.shape[0]
             s = max(0, min(total, int(round(v2v_start_seconds * FPS_HINT))))
             e = total if v2v_end_seconds <= 0 else max(0, min(total, int(round(v2v_end_seconds * FPS_HINT))))
+            if v2v_end_seconds > 0 and v2v_end_seconds * FPS_HINT > total:
+                logging.info("MiniMaxH3Guide: v2v section end %.1fs is past the %.1fs source "
+                             "-- clamped to the end.", v2v_end_seconds, total / FPS_HINT)
             if e <= s:
                 raise ValueError("MiniMax H3 Guide: empty v2v section -- start %.2fs to end "
-                                 "%.2fs of a %.2fs source."
-                                 % (v2v_start_seconds, v2v_end_seconds, total / FPS_HINT))
+                                 "%s of a %.2fs source."
+                                 % (v2v_start_seconds,
+                                    "the end (0)" if v2v_end_seconds <= 0
+                                    else "%.2fs" % v2v_end_seconds,
+                                    total / FPS_HINT))
             frames_sel = v2v_frames[s:e]
             snd_sel = v2v_snd
             if snd_sel is not None and snd_sel.get("waveform") is not None:
@@ -756,9 +772,17 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             if vc is not None:
                 # framed v2v: the window is locked to the WIDGET canvas aspect and
                 # resized to exactly that canvas -- width/height mean something
-                # again (unframed v2v below lets the footage define the canvas)
-                frames_sel = apply_crop(frames_sel, vc, width, height)
-                frames_sel = _resize(frames_sel, width, height, "disabled")
+                # again (unframed v2v below lets the footage define the canvas).
+                # Snap the widgets to the 32 grid FIRST: build_v2v_latent re-rounds
+                # anyway, and resizing to unsnapped dims would mean a second
+                # resample plus a canvas that silently differs from the promise.
+                cw = max(32, int(round(width / 32)) * 32)
+                ch = max(32, int(round(height / 32)) * 32)
+                if (cw, ch) != (width, height):
+                    logging.info("MiniMaxH3Guide: v2v framing canvas snapped to the 32 grid: "
+                                 "%dx%d -> %dx%d.", width, height, cw, ch)
+                frames_sel = apply_crop(frames_sel, vc, cw, ch)
+                frames_sel = _resize(frames_sel, cw, ch, "disabled")
             from .h3_v2v import build_v2v_latent
             latent, frame_count = build_v2v_latent(vae, audio_vae, frames_sel, snd_sel,
                                                    FPS_HINT, 0.0, "v2v source")
@@ -771,6 +795,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 logging.info("MiniMaxH3Guide: v2v canvas follows the footage: %dx%d "
                              "(width/height widgets %dx%d ignored).", fw, fh, width, height)
             width, height = fw, fh
+            trained_area = 768 * 1344
+            if width * height > trained_area * 1.1:
+                logging.warning("MiniMaxH3Guide: v2v canvas %dx%d is %.1fx the trained "
+                                "~768x1344 area -- steps will be slow and quality may "
+                                "drift. Frame the footage (v2v ⛶) to a smaller canvas, "
+                                "or downscale the source first.",
+                                width, height, width * height / trained_area)
             logging.info("MiniMaxH3Guide: v2v source active -- clip length follows the "
                          "footage (%d frames, %.1fs); the length widget is ignored. "
                          "Sample at denoise 0.3-0.7 to restyle.",

@@ -69,7 +69,8 @@ def build_v2v_latent(vae, audio_vae, images, audio=None, fps=24.0, megapixels=0.
         w, h = w * s, h * s
     tw = max(CANVAS_MULTIPLE, round(w / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
     th = max(CANVAS_MULTIPLE, round(h / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-    frames = _resize(frames, tw, th, "disabled")
+    if (tw, th) != (frames.shape[2], frames.shape[1]):   # skip the identity resample
+        frames = _resize(frames, tw, th, "disabled")
     video = vae.encode(frames)
 
     audio_t = round((n / FPS_HINT) * AUDIO_LATENT_FPS)
