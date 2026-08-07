@@ -614,6 +614,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="Restyle only a section of the v2v source: start, in seconds."),
                 io.Float.Input("v2v_end_seconds", default=0.0, min=0.0, max=10000.0, step=0.1,
                     tooltip="Section end in seconds; 0 = to the end of the source."),
+                io.String.Input("v2v_crop", default="",
+                    tooltip="Optional framing for the v2v source: 'center_x, center_y, zoom' (the editor's v2v ⛶ writes this). The window is locked to the width x height widgets' aspect and the footage is resized to exactly that canvas -- so WITH a framing, width/height matter again (reframe landscape footage into a vertical clip, etc.). Without one, the canvas follows the footage and width/height are ignored."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -710,6 +712,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 ref_video_spec="", ref_video_files="", ref_video_megapixels=0.0,
                 ref_video_crops="",
                 v2v_video_file="", v2v_start_seconds=0.0, v2v_end_seconds=0.0,
+                v2v_crop="",
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -749,6 +752,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                                       dtype=sl.dtype, device=sl.device)
                     sl = torch.cat([sl, pad], dim=-1)
                 snd_sel = {"waveform": sl, "sample_rate": sr}
+            vc = parse_crop_spec(v2v_crop, 1, "v2v_crop")[0]
+            if vc is not None:
+                # framed v2v: the window is locked to the WIDGET canvas aspect and
+                # resized to exactly that canvas -- width/height mean something
+                # again (unframed v2v below lets the footage define the canvas)
+                frames_sel = apply_crop(frames_sel, vc, width, height)
+                frames_sel = _resize(frames_sel, width, height, "disabled")
             from .h3_v2v import build_v2v_latent
             latent, frame_count = build_v2v_latent(vae, audio_vae, frames_sel, snd_sel,
                                                    FPS_HINT, 0.0, "v2v source")

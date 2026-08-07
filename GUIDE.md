@@ -35,7 +35,7 @@ Set the first frame from the picker's **output folder** tab (newest first) — g
 Every image and video card has **⛶** — drag/zoom the window over what the model should see. Keyframes are locked to the output aspect, refs/videos keep their own. Corner-drag for exact size, wheel to zoom (Shift = fine), scrub bar on videos.
 
 ### I want to restyle existing footage (v2v)
-Feed the Guide node's `v2v_video_file` (or the `v2v_images`/`v2v_audio` sockets); the latent output becomes the encoded footage. Sample at **denoise 0.3–0.7** — motion survives, style changes. `v2v_start_seconds`/`v2v_end_seconds` restyle just a slice.
+Pick footage in the editor's **🎞 v2v bar** (or feed the `v2v_images`/`v2v_audio` sockets); the latent output becomes the encoded footage. Sample at **denoise 0.3–0.7** — the bar reminds you: that dial lives on your KSampler, not this node. **✂ section…** scrubs the clip and sets the in/out points visually; **⛶** reframes the footage to your width×height canvas (landscape → vertical, etc.) — unframed, the canvas follows the footage instead.
 
 ### I want to restyle only part of a clip and keep the rest untouched
 Use **H3 Frame Range → H3 Video To Latent → KSampler → H3 Splice** — recipe diagram in the [README](README.md#section-restyle--bake-it-back-in). Pin the section's first/last frames from the untouched footage so the joins can't drift.

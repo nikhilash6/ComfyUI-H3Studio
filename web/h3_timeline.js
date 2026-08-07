@@ -316,6 +316,7 @@ const SETUP_FIELDS = [
     "ref_spec", "ref_image_size", "ref_megapixels", "ref_audio_strength",
     "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_megapixels",
     "ref_video_crops", "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds",
+    "v2v_crop",
     "mask_ref_pixels",
 ];
 
@@ -330,6 +331,7 @@ const SETUP_DEFAULTS = {
     ref_spec: "", ref_image_size: "match", ref_megapixels: 0.0, ref_audio_strength: 1.0,
     ref_audio_files: "", ref_video_spec: "", ref_video_files: "", ref_video_megapixels: 0.0,
     ref_video_crops: "", v2v_video_file: "", v2v_start_seconds: 0.0, v2v_end_seconds: 0.0,
+    v2v_crop: "",
     mask_ref_pixels: false,
 };
 
@@ -591,6 +593,8 @@ function attachTimeline(node) {
         if (sel.kind === "mid") return state.midCrops[sel.i] || null;
         if (sel.kind === "ref") return state.refCrops[sel.i] || null;
         if (sel.kind === "video") return state.videoCrops[sel.i] || null;
+        if (sel.kind === "v2v")
+            return parseCropSpec(widgetValue(node, "v2v_crop", ""), 1)[0];
         return null;
     }
     function setCropOf(sel, crop) {
@@ -599,6 +603,11 @@ function attachTimeline(node) {
         else if (sel.kind === "mid") state.midCrops[sel.i] = crop;
         else if (sel.kind === "ref") state.refCrops[sel.i] = crop;
         else if (sel.kind === "video") state.videoCrops[sel.i] = crop;
+        else if (sel.kind === "v2v") {
+            // single-line widget, not part of the entity crop arrays
+            setWidget("v2v_crop", crop ? formatCropSpec([crop]) : "");
+            return;
+        }
         pushCrops();
     }
 
@@ -1623,20 +1632,24 @@ function attachTimeline(node) {
 
     // ---- framing tool: aspect-locked crop window over the source image -------
     function openFramer(sel, _media) {
+        // v2v frames like a KEYFRAME (window locked to the widget canvas — the
+        // footage will be resized to exactly width×height) but scrubs like a video
         const isRef = sel.kind === "ref" || sel.kind === "video";
-        const isVideo = sel.kind === "video";
+        const isVideo = sel.kind === "video" || sel.kind === "v2v";
         let img = null;
         if (sel.kind === "first" || sel.kind === "last") img = capInfo(sel.kind)?.img;
         else if (sel.kind === "mid") img = midImg(state.mids[sel.i]);
         else if (sel.kind === "ref") img = refImg(state.refs[sel.i]);
-        else if (sel.kind === "video") {
-            const v = state.videoRefs[sel.i];
-            if (v?.src.type === "file") {
+        else if (sel.kind === "video" || sel.kind === "v2v") {
+            const name = sel.kind === "v2v"
+                ? String(widgetValue(node, "v2v_video_file", "")).trim()
+                : (state.videoRefs[sel.i]?.src.type === "file" ? state.videoRefs[sel.i].src.name : "");
+            if (name) {
                 img = _media || document.createElement("video");
                 if (!_media) {
                     img.muted = true;
                     img.preload = "auto";
-                    img.src = inputFileUrl(v.src.name);
+                    img.src = inputFileUrl(name);
                 }
             }
         }
@@ -1669,7 +1682,9 @@ function attachTimeline(node) {
                 padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
             });
             head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
-                isRef ? "Frame reference — zoom/pan chooses what the model sees (source aspect)"
+                sel.kind === "v2v"
+                    ? `Frame v2v footage — window locked to ${ow}×${oh}: the restyled clip becomes exactly this canvas`
+                    : isRef ? "Frame reference — zoom/pan chooses what the model sees (source aspect)"
                     : `Frame — window locked to the output aspect ${ow}×${oh}, so no stretch and no blind crop`));
             const resetB = el("button", btnStyle, "reset");
             const clearB = el("button", btnStyle, "no framing");
@@ -2144,7 +2159,7 @@ function attachTimeline(node) {
         const miniSelect = (widget, options, tooltip) => {
             const s = el("select", {
                 background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
-                borderRadius: "3px", fontSize: "11px", padding: "1px 4px", cursor: "pointer",
+                borderRadius: "3px", fontSize: "13px", padding: "3px 8px", cursor: "pointer",
             });
             for (const o of options) {
                 const opt = el("option", null, o);
@@ -2158,9 +2173,9 @@ function attachTimeline(node) {
         };
         const miniNum = (widget, tooltip, width) => {
             const n = el("input", {
-                width: (width || 44) + "px", background: COL.input, color: COL.bright,
+                width: (width || 56) + "px", background: COL.input, color: COL.bright,
                 border: `1px solid ${COL.border}`, borderRadius: "3px",
-                fontSize: "11px", padding: "1px 4px", fontFamily: "monospace", textAlign: "center",
+                fontSize: "13px", padding: "3px 6px", fontFamily: "monospace", textAlign: "center",
             });
             n.title = tooltip;
             n.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") n.blur(); });
@@ -2207,10 +2222,138 @@ function attachTimeline(node) {
             refresh(true);
         });
         const v2vNote = el("span", { fontSize: "11px", display: "none", whiteSpace: "nowrap" });
+        const v2vScrub = el("button", btnStyle, "✂ section…");
+        v2vScrub.title = "scrub the footage and set the in/out points visually";
+        v2vScrub.addEventListener("click", () => openV2vSection());
+        const v2vFrame = el("button", btnStyle, "⛶");
+        v2vFrame.title = "frame the footage: window locked to the width×height widgets — the restyled clip becomes exactly that canvas (reframe landscape into vertical, etc.)";
+        v2vFrame.addEventListener("click", () => openFramer({ kind: "v2v" }));
+        const v2vDenoise = el("span", {
+            color: COL.mid, fontSize: "12px", display: "none", whiteSpace: "nowrap",
+        }, "→ set denoise 0.3–0.7 on your KSampler");
+        v2vDenoise.title = "the restyle amount lives on the SAMPLER, not this node: denoise 1.0 ignores the footage entirely, ~0.3 barely touches it, 0.4–0.7 restyles while keeping the motion";
         v2vBar.append(v2vLabel, v2vNote,
             el("span", { color: COL.text, fontSize: "11px" }, "section"),
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
-            el("span", { color: COL.text, fontSize: "11px" }, "s"), v2vPick, v2vClear);
+            el("span", { color: COL.text, fontSize: "11px" }, "s"),
+            v2vScrub, v2vFrame, v2vPick, v2vClear, v2vDenoise);
+
+        // scrub the v2v footage and set in/out points visually; widgets stay
+        // the source of truth (every set writes v2v_start/end_seconds)
+        function openV2vSection() {
+            const vf = String(widgetValue(node, "v2v_video_file", "")).trim();
+            if (!vf) return;
+            const vv = document.createElement("video");
+            vv.preload = "auto";
+            vv.volume = 0.5;
+            vv.src = inputFileUrl(vf);
+            openModal((root) => {
+                const panel = el("div", {
+                    background: COL.bg, border: `1px solid ${COL.border}`, borderRadius: "8px",
+                    display: "flex", flexDirection: "column", overflow: "hidden",
+                    fontFamily: "sans-serif", maxWidth: "92vw",
+                });
+                const head = el("div", {
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
+                });
+                head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
+                    "Pick the section to restyle — scrub, then set the in/out points"));
+                const doneB = el("button", { ...btnStyle, color: COL.green }, "done");
+                doneB.addEventListener("click", closeModal);
+                head.appendChild(doneB);
+
+                Object.assign(vv.style, {
+                    display: "block", maxWidth: "min(880px, 88vw)", maxHeight: "56vh",
+                    background: "#000",
+                });
+                const strip = el("div", {
+                    position: "relative", height: "34px", margin: "10px 12px 4px",
+                    background: "#101010", border: `1px solid ${COL.border}`,
+                    borderRadius: "4px", cursor: "pointer",
+                });
+                const selBand = el("div", {
+                    position: "absolute", top: "0", bottom: "0",
+                    background: "rgba(158,228,147,0.25)",
+                    borderLeft: `2px solid ${COL.green}`, borderRight: `2px solid ${COL.green}`,
+                    pointerEvents: "none",
+                });
+                const playHead = el("div", {
+                    position: "absolute", top: "0", bottom: "0", width: "2px",
+                    background: COL.bright, pointerEvents: "none",
+                });
+                strip.append(selBand, playHead);
+
+                const bar = el("div", {
+                    display: "flex", gap: "8px", alignItems: "center",
+                    padding: "6px 12px 12px", flexWrap: "wrap",
+                });
+                const playB = el("button", btnStyle, "▶");
+                const inB = el("button", btnStyle, "⟦ start here");
+                const outB = el("button", btnStyle, "end here ⟧");
+                const wholeB = el("button", btnStyle, "whole clip");
+                const readout = el("span", { color: COL.text, fontSize: "12px", flex: "1" });
+                bar.append(playB, inB, outB, wholeB, readout);
+                panel.append(head, vv, strip, bar);
+                root.appendChild(panel);
+
+                const dur = () => (isFinite(vv.duration) && vv.duration > 0) ? vv.duration : 0;
+                const getS = () => Number(widgetValue(node, "v2v_start_seconds", 0)) || 0;
+                const getE = () => Number(widgetValue(node, "v2v_end_seconds", 0)) || 0;
+                const paint = () => {
+                    const d = dur();
+                    const s = getS(), e0 = getE();
+                    const e = e0 <= 0 ? d : Math.min(e0, d);
+                    if (d) {
+                        selBand.style.left = (s / d * 100) + "%";
+                        selBand.style.width = (Math.max(0, e - s) / d * 100) + "%";
+                        playHead.style.left = (vv.currentTime / d * 100) + "%";
+                    }
+                    readout.textContent = d
+                        ? `${vv.currentTime.toFixed(1)}s / ${d.toFixed(1)}s · section ${s.toFixed(1)}s → ${e0 <= 0 ? "end" : e0.toFixed(1) + "s"} (${Math.max(0, e - s).toFixed(1)}s ≈ ${Math.round(Math.max(0, e - s) * FPS)}f)`
+                        : "reading footage…";
+                };
+                const seekTo = (ev) => {
+                    const r = strip.getBoundingClientRect();
+                    if (dur()) vv.currentTime = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1) * dur();
+                };
+                strip.addEventListener("pointerdown", (ev) => {
+                    seekTo(ev);
+                    strip.setPointerCapture(ev.pointerId);
+                });
+                strip.addEventListener("pointermove", (ev) => { if (ev.buttons) seekTo(ev); });
+                vv.addEventListener("timeupdate", paint);
+                vv.addEventListener("loadedmetadata", paint);
+                playB.addEventListener("click", () => {
+                    if (vv.paused) { vv.play(); playB.textContent = "⏸"; }
+                    else { vv.pause(); playB.textContent = "▶"; }
+                });
+                inB.addEventListener("click", () => {
+                    const t = Math.round(vv.currentTime * 10) / 10;
+                    setWidget("v2v_start_seconds", t);
+                    const e0 = getE();
+                    if (e0 > 0 && e0 <= t) setWidget("v2v_end_seconds", 0);
+                    paint(); refresh(false);
+                });
+                outB.addEventListener("click", () => {
+                    const t = Math.round(vv.currentTime * 10) / 10;
+                    setWidget("v2v_end_seconds", t);
+                    if (getS() >= t) setWidget("v2v_start_seconds", 0);
+                    paint(); refresh(false);
+                });
+                wholeB.addEventListener("click", () => {
+                    setWidget("v2v_start_seconds", 0);
+                    setWidget("v2v_end_seconds", 0);
+                    paint(); refresh(false);
+                });
+                paint();
+            }, () => {
+                vv.pause();
+                vv.removeAttribute("src");
+                vv.load();
+                state.fs?.fill?.();
+            });
+        }
 
         const stripHead = el("div", sectionHeadStyle(), "KEYFRAMES — the images the clip passes through");
         const strip = el("div", {
@@ -2243,11 +2386,11 @@ function attachTimeline(node) {
         castB.title = "save the current references as a named cast member, or add a saved one — persists across workflows";
         castB.addEventListener("click", openCastModal);
         refsCtl.appendChild(castB);
-        refsCtl.appendChild(el("span", { fontSize: "11px" }, "sizing"));
+        refsCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "sizing"));
         const sizeSel = miniSelect("ref_image_size", ["match", "max"],
             "'match' scales references to the generation's pixel area; 'max' keeps a 2048px short edge for best identity — several times slower, since reference rows ride every sampling step. Ignored when the MP cap is set.");
         refsCtl.appendChild(sizeSel);
-        refsCtl.appendChild(el("span", { fontSize: "11px" }, "MP cap"));
+        refsCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "MP cap"));
         const mpNum = miniNum("ref_megapixels",
             "Cap each reference at this many megapixels (e.g. 0.4). Overrides sizing when above 0; scales down only. 0 = off.");
         refsCtl.appendChild(mpNum);
@@ -2256,7 +2399,7 @@ function attachTimeline(node) {
         maskChk.style.cursor = "pointer";
         maskChk.title = "mask_ref_pixels: when ON, a reference mask also greys the image the text encoder sees, so it describes only the kept region. OFF (default): only the condition latent is masked.";
         maskChk.addEventListener("change", () => { setWidget("mask_ref_pixels", maskChk.checked); fill(); });
-        const maskWrap = el("label", { display: "inline-flex", gap: "3px", alignItems: "center", fontSize: "11px", cursor: "pointer" });
+        const maskWrap = el("label", { display: "inline-flex", gap: "5px", alignItems: "center", fontSize: "12px", color: COL.text, cursor: "pointer" });
         maskWrap.append(maskChk, el("span", null, "mask→pixels"));
         refsCtl.appendChild(maskWrap);
         const costMeter = el("span", { fontFamily: "monospace", fontSize: "11px", whiteSpace: "nowrap" });
@@ -2336,7 +2479,7 @@ function attachTimeline(node) {
         vidHead.appendChild(el("span", null,
             "VIDEO REFERENCES — motion + identity for the whole clip (2-15s at 24fps). The heaviest reference type: every frame's rows ride every sampling step"));
         const vidCtl = el("span", { display: "inline-flex", gap: "6px", alignItems: "center", whiteSpace: "nowrap" });
-        vidCtl.appendChild(el("span", { fontSize: "11px" }, "MP cap"));
+        vidCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "MP cap"));
         const vidMp = miniNum("ref_video_megapixels",
             "Cap reference video frames at this many megapixels (e.g. 0.4). Aspect-preserving, down-only, 32-grid — never a squish. 0 = the model's 768-short-edge canvas rule. The single biggest speed dial in the pack.");
         vidCtl.appendChild(vidMp);
@@ -3257,11 +3400,20 @@ function attachTimeline(node) {
                 v2vStart.disabled = v2vEnd.disabled = !active;
                 if (active) snapNote.textContent = "· length follows v2v footage";
                 // with v2v the FOOTAGE defines the canvas (python overrides the
-                // widgets) — surface that instead of letting w/h fields mislead
+                // widgets) — UNLESS a ⛶ framing pins it back to width×height.
+                // Surface whichever is true instead of letting w/h fields mislead.
+                const v2vCrop = cropOf({ kind: "v2v" });
+                v2vScrub.style.display = v2vFrame.style.display = (!vSock && vf) ? "" : "none";
+                v2vFrame.style.color = v2vCrop ? COL.green : COL.bright;
+                v2vDenoise.style.display = active ? "" : "none";
                 v2vNote.style.display = active ? "" : "none";
                 if (vSock) {
                     v2vNote.style.color = COL.text;
                     v2vNote.textContent = "· canvas + length follow the footage (w/h/length widgets ignored)";
+                } else if (active && v2vCrop) {
+                    v2vNote.style.color = COL.green;
+                    v2vNote.textContent = `· canvas = your ⛶ window → ${oW}×${oH}`;
+                    v2vNote.title = "framed v2v: the footage is windowed to the width×height aspect and resized to exactly that canvas";
                 } else if (active) {
                     const meta = ensureVideoMeta(vf);
                     if (meta) {
@@ -3725,7 +3877,7 @@ function attachTimeline(node) {
         "first_frame_file", "last_frame_file", "middle_frame_files", "ref_image_files",
         "first_frame_crop", "last_frame_crop", "middle_frame_crops", "ref_image_crops",
         "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_crops",
-        "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds"];
+        "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds", "v2v_crop"];
     let rawVisible = false;
     for (const name of HIDDEN_WIDGETS) setWidgetVisible(node, getWidget(node, name), false);
     node.addWidget("button", "⤢ open timeline editor", null, openFullscreen);
