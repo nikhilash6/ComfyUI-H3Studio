@@ -2212,7 +2212,7 @@ ${res.width}×${res.height} · ${res.license}`
                         return;
                     }
                     for (const res of webAcc) grid.appendChild(webCell(res));
-                    if (results.length >= 24) {
+                    if (results.length >= 20) {
                         const more = el("button", { ...btnStyle, alignSelf: "center" }, "more…");
                         more.addEventListener("click", () => { webPage++; runWebSearch(true); });
                         grid.appendChild(more);

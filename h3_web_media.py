@@ -115,7 +115,7 @@ def register():
             return web.json_response({"results": []})
         page = request.rel_url.query.get("page", "1")
         params = {
-            "q": q, "page_size": "24",
+            "q": q, "page_size": "20",   # anonymous Openverse cap (>20 = 401)
             "page": page if page.isdigit() else "1",
             # no license prefilter: every CC/PD result shows, with its license
             # on the card and in credits.txt — the call is the user's
