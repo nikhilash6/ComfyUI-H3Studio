@@ -3278,7 +3278,8 @@ function attachTimeline(node) {
         }
         function hideFramePreview() {
             framePrev.style.display = "none";
-            scrubFrac = null;
+            // scrubFrac deliberately survives: the playhead persists where you
+            // left it (cleared automatically when the v2v source goes away)
         }
 
         const ghost = { key: "", thumbs: [] };
@@ -3457,12 +3458,15 @@ function attachTimeline(node) {
             });
 
             // drag readout chip
+            if (scrubFrac != null && !scrubSource()) scrubFrac = null;
             if (scrubFrac != null) {
                 const x = fracToX(T, scrubFrac);
+                ctx.globalAlpha = state.drag?.kind === "scrub" ? 1 : 0.55;
                 ctx.strokeStyle = COL.bright;
                 ctx.lineWidth = 2;
                 ctx.beginPath(); ctx.moveTo(x, T.ruler - 4); ctx.lineTo(x, T.by + 8); ctx.stroke();
                 ctx.lineWidth = 1;
+                ctx.globalAlpha = 1;
             }
             if (state.dragReadout) {
                 const { x, text } = state.dragReadout;
@@ -3495,12 +3499,14 @@ function attachTimeline(node) {
             const p = evPos(ev);
             const h = hitAt(p);
             const T = track._h3T;
-            if (!h && p.y <= T.ruler + 6 && scrubSource()) {
-                // drag along the ruler = playhead scrub over the v2v footage
+            if (!h && scrubSource() && p.y <= T.by - 14) {
+                // press anywhere on the empty track = playhead scrub over the
+                // v2v footage. A lane press that never moves is still treated
+                // as the old deselect-click (maybeClick, resolved on release).
                 track.setPointerCapture(ev.pointerId);
-                state.drag = { kind: "scrub", T };
+                state.drag = { kind: "scrub", T, x0: p.x, maybeClick: p.y > T.ruler + 6 };
                 scrubFrac = xToFrac(T, p.x);
-                showFramePreview(scrubFrac);
+                if (!state.drag.maybeClick) showFramePreview(scrubFrac);
                 renderTrack();
                 return;
             }
@@ -3538,8 +3544,9 @@ function attachTimeline(node) {
             const T = d.T;
             const F = fc();
             if (d.kind === "scrub") {
+                if (d.maybeClick && Math.abs(p.x - d.x0) > 3) d.maybeClick = false;
                 scrubFrac = xToFrac(T, p.x);
-                showFramePreview(scrubFrac);
+                if (!d.maybeClick) showFramePreview(scrubFrac);
                 renderTrack();
                 return;   // nothing written — no refresh needed
             }
@@ -3576,11 +3583,13 @@ function attachTimeline(node) {
         const endDrag = (ev) => {
             if (!state.drag) return;
             const wasScrub = state.drag.kind === "scrub";
+            const wasClick = wasScrub && state.drag.maybeClick;
             state.drag = null;
             state.dragReadout = null;
             hideFramePreview();
             try { track.releasePointerCapture(ev.pointerId); } catch (e) { /* released */ }
-            if (wasScrub) renderTrack();
+            if (wasClick) { state.sel = null; fill(); }   // lane click = deselect (playhead moves too)
+            else if (wasScrub) renderTrack();
             else refresh(true);   // re-pull: the spec's nudged/quantized values win
         };
         track.addEventListener("pointerup", endDrag);
