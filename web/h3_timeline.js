@@ -36,7 +36,7 @@ const NODE_NAME = "MiniMaxH3ImageToVideoGuide";
 // against the Python parsers headlessly — keep dependencies inside it)
 
 const FPS = 24;
-const AUTO_MIDDLE_STRENGTH = 0.6;
+const AUTO_MIDDLE_STRENGTH = 1.0;   // MUST match minimax_h3_guide.py
 
 function snapFrameCount(length) {
     let n = Math.max(5, Math.round(length));
@@ -423,7 +423,7 @@ const HELP_COPY = [
     ["Waypoints vs beats", "A waypoint is an image the clip should pass through at a moment. A beat is text pinned to a moment — no image."],
     ["Strength", "How hard a frame is enforced. 1.0 = hit it exactly. 0.6–0.8 keeps composition but frees the motion. Above 1.0 = overdrive."],
     ["References", "Not on the timeline — they define the subject for the whole clip. 1.0 locks identity; 0.7 is a likeness hint."],
-    ["Auto placement", "Unplaced waypoints are spaced evenly at strength 0.6 and shown dimmed. Drag one and its placement becomes yours."],
+    ["Auto placement", "Unplaced waypoints are spaced evenly at FULL strength and shown dimmed. Drag one and its placement becomes yours; lower to ~0.6 to free the motion."],
 ];
 
 // ============================================================================

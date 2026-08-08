@@ -108,7 +108,7 @@ MIDDLE_FRAME_NOISE_SEED_BASE = 100  # middle N gets 100 + N, well clear of the t
 
 # Used when middle frames are connected but the spec is left empty: waypoints spread
 # evenly through the clip at a deliberately loose strength.
-AUTO_MIDDLE_STRENGTH = 0.6
+AUTO_MIDDLE_STRENGTH = 1.0  # MUST match web/h3_timeline.js
 
 # Reference images default to a full-strength identity lock; the spec overrides.
 AUTO_REF_STRENGTH = 1.0
