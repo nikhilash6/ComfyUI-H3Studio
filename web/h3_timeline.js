@@ -2316,6 +2316,19 @@ function attachTimeline(node) {
             delete v2vFrame.dataset.confirm;
             openFramer({ kind: "v2v" });
         });
+        const ghostWrap = el("span", { display: "none", alignItems: "center", gap: "4px" });
+        ghostWrap.appendChild(el("span", { color: COL.text, fontSize: "11px" }, "ghost"));
+        const ghostSl = el("input");
+        ghostSl.type = "range"; ghostSl.min = "0"; ghostSl.max = "80"; ghostSl.step = "5";
+        Object.assign(ghostSl.style, { width: "64px", accentColor: COL.slider, cursor: "pointer" });
+        ghostSl.title = "opacity of the footage filmstrip behind the timeline (0 hides it)";
+        ghostSl.addEventListener("input", () => {
+            node.properties = node.properties || {};
+            node.properties.h3_ghost_opacity = parseInt(ghostSl.value, 10) / 100;
+            renderTrack();
+        });
+        ghostSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        ghostWrap.appendChild(ghostSl);
         const v2vDenoise = el("span", {
             color: COL.mid, fontSize: "12px", display: "none", whiteSpace: "nowrap",
         }, "→ set denoise 0.3–0.7 on your KSampler");
@@ -2324,7 +2337,7 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "section"),
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            v2vScrub, v2vFrame, v2vPick, v2vClear, v2vDenoise);
+            v2vScrub, v2vFrame, ghostWrap, v2vPick, v2vClear, v2vDenoise);
 
         // scrub the v2v footage and set in/out points visually; widgets stay
         // the source of truth (every set writes v2v_start/end_seconds)
@@ -3164,6 +3177,50 @@ function attachTimeline(node) {
         const fracToX = (T, f) => T.x0 + f * (T.x1 - T.x0);
         const xToFrac = (T, x) => Math.min(1, Math.max(0, (x - T.x0) / (T.x1 - T.x0)));
 
+        // v2v filmstrip ghost: frames sampled across the selected section,
+        // drawn dimmed UNDER the lanes so the timeline shows the footage it is
+        // restyling. NLE-style center crops; opacity dial lives in the v2v bar
+        // and persists in node.properties (a UI preference, not a widget).
+        const ghost = { key: "", thumbs: [] };
+        const GHOST_N = 14;
+        const ghostOpacity = () =>
+            Number.isFinite(node.properties?.h3_ghost_opacity) ? node.properties.h3_ghost_opacity : 0.35;
+        function buildGhost(key, vf, s0, e0) {
+            ghost.key = key;
+            ghost.thumbs = [];
+            const vv = document.createElement("video");
+            vv.muted = true;
+            vv.preload = "auto";
+            vv.src = inputFileUrl(vf);
+            const bail = () => { vv.removeAttribute("src"); vv.load(); };
+            vv.addEventListener("error", bail, { once: true });
+            vv.addEventListener("loadedmetadata", () => {
+                const D = isFinite(vv.duration) ? vv.duration : 0;
+                if (!D || !vv.videoWidth) return bail();
+                const s = Math.min(s0, D);
+                const e = Math.max(s + 0.01, Math.min(e0 > 0 ? e0 : D, D));
+                let i = 0;
+                vv.addEventListener("seeked", () => {
+                    if (!state.fs || ghost.key !== key) return bail();   // superseded/closed
+                    const c = document.createElement("canvas");
+                    c.width = 96; c.height = 140;   // tallish slice, cover-cropped
+                    const sc = Math.max(c.width / vv.videoWidth, c.height / vv.videoHeight);
+                    const cw = c.width / sc, ch2 = c.height / sc;
+                    try {
+                        c.getContext("2d").drawImage(vv,
+                            (vv.videoWidth - cw) / 2, (vv.videoHeight - ch2) / 2, cw, ch2,
+                            0, 0, c.width, c.height);
+                    } catch (err) { return bail(); }
+                    ghost.thumbs[i] = c;
+                    renderTrack();
+                    i++;
+                    if (i < GHOST_N) vv.currentTime = s + (i + 0.5) / GHOST_N * (e - s);
+                    else bail();
+                });
+                vv.currentTime = s + 0.5 / GHOST_N * (e - s);
+            }, { once: true });
+        }
+
         function renderTrack() {
             const rect = track.getBoundingClientRect();
             if (rect.width < 4) return;
@@ -3178,6 +3235,36 @@ function attachTimeline(node) {
             track._h3T = T;
             track._h3Hits = hits;
             const F = fc(), dur = F / FPS;
+
+            // v2v ghost strip (under all lanes)
+            {
+                const vf = String(widgetValue(node, "v2v_video_file", "")).trim();
+                if (vf && !inputConnected(node, "v2v_images")) {
+                    const gs = Number(widgetValue(node, "v2v_start_seconds", 0)) || 0;
+                    const ge = Number(widgetValue(node, "v2v_end_seconds", 0)) || 0;
+                    const key = `${vf}|${gs}|${ge}`;
+                    if (ghost.key !== key) buildGhost(key, vf, gs, ge);
+                    const op = ghostOpacity();
+                    if (op > 0.01 && ghost.thumbs.length) {
+                        const y0 = T.ruler + 10, y1 = T.by - 16, hgt = y1 - y0;
+                        const w = (T.x1 - T.x0) / GHOST_N;
+                        ctx.globalAlpha = op;
+                        for (let k = 0; k < GHOST_N; k++) {
+                            const th = ghost.thumbs[k];
+                            if (!th) continue;
+                            // cover-crop the cached slice to the drawn slice aspect
+                            const sc = Math.max(w / th.width, hgt / th.height);
+                            const cw = w / sc, ch2 = hgt / sc;
+                            ctx.drawImage(th, (th.width - cw) / 2, (th.height - ch2) / 2,
+                                cw, ch2, T.x0 + k * w, y0, w, hgt);
+                        }
+                        ctx.globalAlpha = 1;
+                    }
+                } else if (ghost.key) {
+                    ghost.key = "";
+                    ghost.thumbs = [];
+                }
+            }
 
             // ruler
             ctx.font = "12px monospace";
@@ -3501,6 +3588,9 @@ function attachTimeline(node) {
                 // Surface whichever is true instead of letting w/h fields mislead.
                 const v2vCrop = cropOf({ kind: "v2v" });
                 v2vScrub.style.display = (!vSock && vf) ? "" : "none";
+                ghostWrap.style.display = (!vSock && vf) ? "inline-flex" : "none";
+                if (document.activeElement !== ghostSl)
+                    ghostSl.value = String(Math.round(ghostOpacity() * 100));
                 // socket footage can't be framed here (no preview), but a crop
                 // set earlier STILL applies python-side — keep ⛶ visible as a
                 // two-click clear so it can never pin the canvas invisibly
