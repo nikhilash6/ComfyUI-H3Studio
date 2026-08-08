@@ -27,9 +27,10 @@ from urllib.parse import urlencode, urlsplit
 def _http_get(url, max_bytes):
     """Plain-stdlib GET -> (status, bytes, content_type).
 
-    Deliberately NOT aiohttp: another extension in the install monkeypatches the
-    aiohttp client with an auth header that made Openverse return 401. urllib
-    with a fresh opener is isolated from that class of interference.
+    stdlib rather than aiohttp for two reasons: a fresh opener is isolated from
+    anything other extensions may patch onto the aiohttp client, and HTTPError
+    bodies are captured — which is how the Openverse anonymous page_size cap
+    (>20 = 401) was diagnosed instead of showing as a bare status code.
     """
     req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-MiniMaxH3Guide"})
     opener = urllib.request.build_opener()
