@@ -2260,14 +2260,57 @@ ${res.width}×${res.height} · ${res.license}`
                     : "";
                 caption.style.display = tab === "output" ? "" : "none";
                 grid.textContent = "";
-                const inFolder = (f) => {
-                    if (!folder) return true;
-                    const clean = f.replace(/\s*\[\w+\]\s*$/, "");
-                    return clean.startsWith(folder + "/");
+                const cleanOf = (f) => f.replace(/\s*\[\w+\]\s*$/, "");
+                const dirOf = (f) => {
+                    const c = cleanOf(f);
+                    const s2 = c.lastIndexOf("/");
+                    return s2 > -1 ? c.slice(0, s2) : "";
                 };
-                const match = files.filter((f) => inFolder(f)
-                    && (!filter || f.toLowerCase().includes(filter)));
-                if (!match.length) grid.appendChild(el("div",
+                const under = (f) => !folder ? true
+                    : (dirOf(f) === folder || dirOf(f).startsWith(folder + "/"));
+                let tiles = 0;
+                if (!filter && !webMode) {
+                    // explorer view: navigable folder tiles above this folder's files
+                    const goTo = (target) => {
+                        folder = target;
+                        folderSel.value = [...folderSel.options].some((o) => o.value === folder)
+                            ? folder : "";
+                        styleFav();
+                        fill("");
+                    };
+                    const tile = (label, target) => {
+                        const c = el("div", {
+                            width: "110px", height: "74px", display: "flex",
+                            flexDirection: "column", alignItems: "center",
+                            justifyContent: "center", gap: "2px",
+                            border: `2px dashed ${COL.slider}`, borderRadius: "4px",
+                            color: COL.bright, fontSize: "11px", cursor: "pointer",
+                            overflow: "hidden", padding: "2px",
+                        });
+                        c.append(el("span", { fontSize: "20px" }, "📁"),
+                            el("span", { maxWidth: "100px", overflow: "hidden",
+                                textOverflow: "ellipsis", whiteSpace: "nowrap" }, label));
+                        c.title = target || "(root)";
+                        c.addEventListener("click", () => goTo(target));
+                        tiles++;
+                        return c;
+                    };
+                    if (folder)
+                        grid.appendChild(tile("⬑ up",
+                            folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : ""));
+                    const kids = new Set();
+                    for (const f of files) {
+                        const d = dirOf(f);
+                        if (!under(f) || d === folder) continue;
+                        const rest = folder ? d.slice(folder.length + 1) : d;
+                        if (rest) kids.add(rest.split("/")[0]);
+                    }
+                    for (const k of [...kids].sort())
+                        grid.appendChild(tile(k, folder ? folder + "/" + k : k));
+                }
+                const match = files.filter((f) => under(f)
+                    && (filter ? f.toLowerCase().includes(filter) : dirOf(f) === folder));
+                if (!match.length && !tiles) grid.appendChild(el("div",
                     { color: COL.text, fontSize: "12px" },
                     files.length ? "no matches"
                         : tab === "output" ? "output folder is empty — render something first"

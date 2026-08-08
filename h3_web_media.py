@@ -13,13 +13,46 @@ carries license + creator, the UI shows them, and each download appends a
 JSON line to input/web/credits.txt so attribution survives the session.
 """
 
+import asyncio
 import ipaddress
 import json
 import os
 import re
 import socket
 import time
-from urllib.parse import urlsplit
+import urllib.request
+from urllib.parse import urlencode, urlsplit
+
+
+def _http_get(url, max_bytes):
+    """Plain-stdlib GET -> (status, bytes, content_type).
+
+    Deliberately NOT aiohttp: another extension in the install monkeypatches the
+    aiohttp client with an auth header that made Openverse return 401. urllib
+    with a fresh opener is isolated from that class of interference.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-MiniMaxH3Guide"})
+    opener = urllib.request.build_opener()
+    try:
+        with opener.open(req, timeout=60) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+            chunks = []
+            got = 0
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > max_bytes:
+                    return 413, b"", ctype
+                chunks.append(chunk)
+            return resp.status, b"".join(chunks), ctype
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(2048)
+        except Exception:
+            body = b""
+        return e.code, body, ""
 
 OPENVERSE = {"images": "https://api.openverse.org/v1/images/",
              "audio": "https://api.openverse.org/v1/audio/"}
@@ -61,7 +94,6 @@ def _safe_name(title, url, uid, kind):
 
 def register():
     try:
-        import aiohttp
         from aiohttp import web
         import folder_paths
         from PIL import Image
@@ -89,14 +121,13 @@ def register():
             # on the card and in credits.txt — the call is the user's
         }
         try:
-            timeout = aiohttp.ClientTimeout(total=20)
-            async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.get(endpoint, params=params,
-                                    headers={"User-Agent": "ComfyUI-MiniMaxH3Guide"}) as resp:
-                    if resp.status != 200:
-                        return web.json_response(
-                            {"error": "openverse returned %d" % resp.status}, status=502)
-                    data = await resp.json()
+            status, body, _ = await asyncio.to_thread(
+                _http_get, endpoint + "?" + urlencode(params), 8 * 1024 * 1024)
+            if status != 200:
+                return web.json_response(
+                    {"error": "openverse returned %d: %s"
+                     % (status, body[:120].decode("utf-8", "replace"))}, status=502)
+            data = json.loads(body)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=502)
         out = []
@@ -130,19 +161,11 @@ def register():
         if _host_is_private(parts.hostname):
             return web.json_response({"error": "refusing private address"}, status=403)
         try:
-            timeout = aiohttp.ClientTimeout(total=120)
-            async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.get(url, headers={"User-Agent": "ComfyUI-MiniMaxH3Guide"},
-                                    max_redirects=5) as resp:
-                    if resp.status != 200:
-                        return web.json_response(
-                            {"error": "source returned %d" % resp.status}, status=502)
-                    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
-                    body = b""
-                    async for chunk in resp.content.iter_chunked(1 << 16):
-                        body += chunk
-                        if len(body) > MAX_BYTES:
-                            return web.json_response({"error": "file too large"}, status=413)
+            status, body, ctype = await asyncio.to_thread(_http_get, url, MAX_BYTES)
+            if status == 413:
+                return web.json_response({"error": "file too large"}, status=413)
+            if status != 200:
+                return web.json_response({"error": "source returned %d" % status}, status=502)
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=502)
         if kind == "images":
