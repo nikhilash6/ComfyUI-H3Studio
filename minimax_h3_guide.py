@@ -1095,8 +1095,9 @@ class MiniMaxH3GuideExtension(ComfyExtension):
     async def get_node_list(self):
         from .load_image_zoom_pan import LoadImageZoomPan
         from .h3_v2v import H3VideoToLatent, H3FrameRange, H3Splice
+        from .h3_temporal_lora import H3TemporalLoraBlend
         return [MiniMaxH3ImageToVideoGuide, LoadImageZoomPan,
-                H3VideoToLatent, H3FrameRange, H3Splice]
+                H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend]
 
 
 async def comfy_entrypoint() -> MiniMaxH3GuideExtension:
