@@ -2482,12 +2482,54 @@ function attachTimeline(node) {
                 const strVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" }, "0.55");
                 strSl.addEventListener("input", () => strVal.textContent = Number(strSl.value).toFixed(2));
                 const strRow = el("div", { display: "flex", alignItems: "center", gap: "8px" });
-                strRow.append(el("span", { color: COL.text, fontSize: "12px", width: "72px" }, "strength"), strSl, strVal);
+                strRow.append(el("span", { color: COL.text, fontSize: "12px", width: "72px" }, "tween str"), strSl, strVal);
+                // numeric zoom per window — Deforum-style pushes want exact values
+                const zField = (get, set, color) => {
+                    const f = el("input");
+                    Object.assign(f.style, {
+                        width: "52px", background: COL.input, color, border: `1px solid ${COL.border}`,
+                        borderRadius: "3px", fontSize: "13px", padding: "2px 4px",
+                        fontFamily: "monospace", textAlign: "center",
+                    });
+                    f.value = get().toFixed(2);
+                    f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
+                    f.addEventListener("blur", () => {
+                        const v = parseFloat(f.value);
+                        set(Math.max(1, isFinite(v) ? v : 1));
+                        f.value = get().toFixed(2);
+                        draw();
+                    });
+                    return f;
+                };
+                const zA = zField(() => A.z, (v) => A.z = v, COL.cap);
+                const zB = zField(() => B.z, (v) => B.z = v, COL.green);
+                const zRow = el("div", { display: "flex", alignItems: "center", gap: "6px" });
+                zRow.append(el("span", { color: COL.text, fontSize: "12px", width: "72px" }, "zoom"),
+                    el("span", { color: COL.cap, fontSize: "12px" }, "A"), zA,
+                    el("span", { color: COL.green, fontSize: "12px" }, "B"), zB,
+                    el("span", { color: "#666", fontSize: "11px" }, "×"));
+                // anchor strengths, right where the zoom decision is made: a big
+                // zoom means a small upscaled end crop — often wants softening
+                const capDial = (widget, label) => {
+                    const sl = el("input");
+                    sl.type = "range"; sl.min = "0"; sl.max = "2"; sl.step = "0.05";
+                    sl.value = String(Number(widgetValue(node, widget, 1.0)));
+                    Object.assign(sl.style, { flex: "1", accentColor: COL.cap, cursor: "pointer" });
+                    const val = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" },
+                        Number(sl.value).toFixed(2));
+                    sl.addEventListener("input", () => val.textContent = Number(sl.value).toFixed(2));
+                    const r = el("div", { display: "flex", alignItems: "center", gap: "8px" });
+                    r.append(el("span", { color: COL.text, fontSize: "12px", width: "72px" }, label), sl, val);
+                    return { row: r, sl };
+                };
+                const startD = capDial("first_frame_strength", "start str");
+                const endD = capDial("last_frame_strength", "end str");
                 const hint = el("div", { color: "#666", fontSize: "11px", lineHeight: "1.45" },
                     "low strength = the model adds parallax and life along your path; high = a mechanical crop-pan. Ends anchor at the first/last frame strengths.");
                 const prevB = el("button", btnStyle, "▶ preview move");
                 const placeB = el("button", { ...btnStyle, color: COL.green }, "✦ place on timeline");
-                side.append(mkRow("waypoints", cntSel), mkRow("curve", easeSel), strRow, prevB, placeB, hint);
+                side.append(mkRow("waypoints", cntSel), mkRow("curve", easeSel), zRow,
+                    strRow, startD.row, endD.row, prevB, placeB, hint);
                 body.append(cnv, side);
                 panel.append(head, body);
                 root.appendChild(panel);
@@ -2607,6 +2649,7 @@ function attachTimeline(node) {
                     active = tag;
                     const w2 = tag === "A" ? A : B;
                     w2.z = Math.max(1, w2.z * Math.exp(-ev.deltaY * (ev.shiftKey ? 0.00015 : 0.0006)));
+                    (tag === "A" ? zA : zB).value = w2.z.toFixed(2);
                     draw();
                 }, { passive: false });
 
@@ -2627,6 +2670,8 @@ function attachTimeline(node) {
                 });
                 placeB.addEventListener("click", () => {
                     stopAnim();
+                    setWidget("first_frame_strength", Number(startD.sl.value));
+                    setWidget("last_frame_strength", Number(endD.sl.value));
                     if (placeMotionPath(name, A, B, parseInt(cntSel.value, 10),
                         easeSel.value, Number(strSl.value))) closeModal();
                 });
@@ -3063,15 +3108,23 @@ function attachTimeline(node) {
                     entity.kind === "first" ? "0.0s" : timeOf(entity.frac).toFixed(1) + "s"),
                 picChip(entity.pic, color));
             const row2 = el("div", { display: "flex", alignItems: "center", gap: "6px" });
-            const bar = el("div", { flex: "1", height: "4px", background: "#2a2a2a", borderRadius: "2px" });
-            const fillBar = el("div", {
-                width: Math.min(100, entity.strength / 2 * 100) + "%", height: "100%",
-                background: color, borderRadius: "2px",
-                opacity: entity.strength > 1.0 ? "0.6" : "1",
+            const sVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" },
+                entity.strength.toFixed(2));
+            const sSl = el("input");
+            sSl.type = "range"; sSl.min = "0"; sSl.max = "2"; sSl.step = "0.05";
+            sSl.value = String(entity.strength);
+            Object.assign(sSl.style, { flex: "1", accentColor: color, cursor: "pointer" });
+            sSl.title = "strength — how hard this frame is enforced (also draggable as the stem on the track)";
+            sSl.addEventListener("input", () => {
+                const v = Math.round(parseFloat(sSl.value) * 20) / 20;
+                sVal.textContent = v.toFixed(2);
+                if (entity.kind === "mid") { state.mids[entity.i].strength = v; pushMids(); }
+                else setWidget(entity.kind + "_frame_strength", v);
+                refresh(false);
             });
-            bar.appendChild(fillBar);
-            row2.append(el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" },
-                entity.strength.toFixed(2)), bar);
+            sSl.addEventListener("change", () => fill());
+            sSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+            row2.append(sVal, sSl);
             const row3 = el("div", { display: "flex", justifyContent: "space-between", alignItems: "center" });
             const srcTxt = entity.connected
                 ? (entity.kind === "mid" ? `SOCKET m${state.mids[entity.i].src.slot}` : "SOCKET")
