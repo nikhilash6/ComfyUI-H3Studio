@@ -1511,15 +1511,15 @@ function attachTimeline(node) {
     function openCastModal() {
         openModal(async (root) => {
             const panel = el("div", {
-                width: "min(760px, 92vw)", maxHeight: "84vh", background: COL.bg,
+                width: "min(1040px, 94vw)", maxHeight: "88vh", background: COL.bg,
                 border: `1px solid ${COL.border}`, borderRadius: "8px", display: "flex",
                 flexDirection: "column", overflow: "hidden", fontFamily: "sans-serif",
             });
             const head = el("div", {
                 display: "flex", gap: "8px", alignItems: "center",
-                padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
+                padding: "10px 14px", borderBottom: `1px solid ${COL.divider}`,
             });
-            head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
+            head.appendChild(el("span", { color: COL.bright, fontSize: "15px", flex: "1" },
                 "\u{1F3AD} Cast — save people/assets once, reuse them in any clip or workflow"));
             const closeB = el("button", btnStyle, "✕");
             closeB.addEventListener("click", closeModal);
@@ -1546,11 +1546,14 @@ function attachTimeline(node) {
                 const rowWrap = el("div", { display: "flex", flexWrap: "wrap", gap: "8px", margin: "6px 0" });
                 for (const { r, i } of savables) {
                     const lab = el("label", { display: "flex", flexDirection: "column",
-                        alignItems: "center", gap: "3px", cursor: "pointer", width: "84px" });
+                        alignItems: "center", gap: "4px", cursor: "pointer", width: "116px" });
                     const cb = el("input");
                     cb.type = "checkbox"; cb.checked = true;
                     checks.push({ cb, kind: "image", r, i });
-                    lab.append(thumbEl(refImg(r), 80, 50, "", state.refCrops[i], null), cb);
+                    lab.append(thumbEl(refImg(r), 112, 112, "", state.refCrops[i], null),
+                        el("span", { color: COL.text, fontSize: "11px", fontFamily: "monospace" },
+                            r.strength.toFixed(2) + (state.refCrops[i] ? " · ⛶" : "")),
+                        cb);
                     rowWrap.appendChild(lab);
                 }
                 savableAudio.forEach((f) => {
@@ -1611,7 +1614,8 @@ function attachTimeline(node) {
             });
             loadBox.appendChild(el("div", { color: COL.bright, fontSize: "12px", marginBottom: "6px" },
                 "Add a saved cast member to this clip"));
-            const listEl = el("div", { display: "flex", flexDirection: "column", gap: "8px" });
+            const listEl = el("div", { display: "flex", flexWrap: "wrap", gap: "12px",
+                alignItems: "stretch" });
             loadBox.appendChild(listEl);
             loadBox.appendChild(el("div", { color: "#666", fontSize: "10px", marginTop: "8px" },
                 "to remove a cast member, delete its h3cast-….json from the input folder"));
@@ -1635,25 +1639,44 @@ function attachTimeline(node) {
                 } catch (e) { /* unreadable */ }
                 if (state.modal?.root !== myRoot) return;   // closed mid-fetch
                 const row = el("div", {
-                    display: "flex", alignItems: "center", gap: "10px",
-                    border: `1px solid ${COL.divider}`, borderRadius: "5px", padding: "6px 10px",
+                    display: "flex", flexDirection: "column", gap: "8px", width: "236px",
+                    background: COL.panel, border: `1px solid ${COL.border}`,
+                    borderRadius: "6px", padding: "10px",
                 });
+                row.addEventListener("mouseenter", () => row.style.borderColor = COL.slider);
+                row.addEventListener("mouseleave", () => row.style.borderColor = COL.border);
                 if (!cast) {
                     row.append(el("span", { color: COL.red, fontSize: "12px" },
                         `⚠ ${f} is not a valid cast file`));
                     listEl.appendChild(row);
                     continue;
                 }
-                row.appendChild(el("span", { color: COL.bright, fontSize: "13px", width: "110px",
-                    overflow: "hidden", textOverflow: "ellipsis" }, cast.name));
-                const thumbs = el("div", { display: "flex", gap: "4px", flex: "1" });
-                for (const im of cast.images.slice(0, 5))
-                    thumbs.appendChild(thumbEl(cachedImg(im.file), 56, 36, "", im.crop, null));
-                if (cast.audio.length)
-                    thumbs.appendChild(el("span", { color: COL.green, fontSize: "12px", alignSelf: "center" },
-                        "♪×" + cast.audio.length));
+                const nameLine = el("div", { display: "flex", alignItems: "baseline", gap: "8px" });
+                nameLine.append(
+                    el("span", { color: COL.bright, fontSize: "15px", flex: "1",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, cast.name),
+                    el("span", { color: COL.text, fontSize: "11px" },
+                        cast.images.length + " ref" + (cast.images.length === 1 ? "" : "s")
+                        + (cast.audio.length ? " · ♪×" + cast.audio.length : "")));
+                row.appendChild(nameLine);
+                const thumbs = el("div", { display: "flex", flexWrap: "wrap", gap: "6px" });
+                for (const im of cast.images.slice(0, 4)) {
+                    const cell = el("div", { display: "flex", flexDirection: "column",
+                        alignItems: "center", gap: "2px" });
+                    cell.append(thumbEl(cachedImg(im.file), 100, 100, "", im.crop, null),
+                        el("span", { color: "#666", fontSize: "10px", fontFamily: "monospace" },
+                            im.strength.toFixed(2) + (im.crop ? " · ⛶" : "")));
+                    thumbs.appendChild(cell);
+                }
+                if (cast.images.length > 4)
+                    thumbs.appendChild(el("div", {
+                        width: "100px", height: "100px", display: "flex", alignItems: "center",
+                        justifyContent: "center", color: COL.text, fontSize: "13px",
+                        background: "#101010", borderRadius: "4px",
+                    }, "+" + (cast.images.length - 4) + " more"));
                 row.appendChild(thumbs);
-                const addB = el("button", { ...btnStyle, color: COL.green }, "add");
+                const addB = el("button", { ...btnStyle, color: COL.green, padding: "7px 12px",
+                    fontSize: "13px", marginTop: "auto" }, "➕ add to clip");
                 addB.title = "add this cast member's references (with strengths and framings) to the clip";
                 addB.addEventListener("click", () => {
                     if (state.refSpecError) {
