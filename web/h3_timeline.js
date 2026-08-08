@@ -2595,11 +2595,17 @@ function attachTimeline(node) {
         });
         vidHead.appendChild(el("span", null,
             "VIDEO REFERENCES — motion + identity for the whole clip (2-15s at 24fps). The heaviest reference type: every frame's rows ride every sampling step"));
-        const vidCtl = el("span", { display: "inline-flex", gap: "6px", alignItems: "center", whiteSpace: "nowrap" });
-        vidCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "MP cap"));
+        // grouped pill: a bare label+box floating in the header read as stranded
+        const vidCtl = el("span", {
+            display: "inline-flex", gap: "8px", alignItems: "center", whiteSpace: "nowrap",
+            background: COL.panel, border: `1px solid ${COL.border}`,
+            borderRadius: "5px", padding: "4px 12px", alignSelf: "center",
+        });
+        vidCtl.appendChild(el("span", { fontSize: "12px", color: COL.bright }, "⚡ MP cap"));
         const vidMp = miniNum("ref_video_megapixels",
             "Cap reference video frames at this many megapixels (e.g. 0.4). Aspect-preserving, down-only, 32-grid — never a squish. 0 = the model's 768-short-edge canvas rule. The single biggest speed dial in the pack.");
         vidCtl.appendChild(vidMp);
+        vidCtl.appendChild(el("span", { fontSize: "11px", color: "#666" }, "0 = auto · the big speed dial"));
         vidHead.appendChild(vidCtl);
         const vidRow = el("div", {
             display: "flex", gap: "12px", padding: "8px 16px 16px", overflowX: "auto",
