@@ -21,6 +21,13 @@ except Exception as exc:
     logging.warning("MiniMaxH3Guide: preview endpoint skipped (%s: %s)",
                     type(exc).__name__, exc)
 
+# Openverse free image/audio search proxy (no-op headless)
+try:
+    from . import h3_web_media  # noqa: F401  (registers its routes at import)
+except Exception as exc:
+    logging.warning("MiniMaxH3Guide: web media search skipped (%s: %s)",
+                    type(exc).__name__, exc)
+
 WEB_DIRECTORY = "./web"
 
 __all__ = ["comfy_entrypoint", "WEB_DIRECTORY"]

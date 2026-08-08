@@ -1165,6 +1165,8 @@ function attachTimeline(node) {
             });
             head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
                 "Pick reference audio"));
+            const webBtn = el("button", btnStyle, "🌐 web…");
+            webBtn.title = "search free Creative Commons sounds (Openverse: Freesound/Jamendo, commercial-use licenses) and pull them into the input folder";
             const up = el("button", btnStyle, "upload…");
             const fi = el("input");
             fi.type = "file";
@@ -1181,7 +1183,7 @@ function attachTimeline(node) {
             });
             const closeB = el("button", btnStyle, "✕");
             closeB.addEventListener("click", closeModal);
-            head.append(up, fi, closeB);
+            head.append(webBtn, up, fi, closeB);
             const list = el("div", { overflowY: "auto", padding: "6px" });
             if (!files.length) list.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "8px" },
                 "no audio in the input folder — use upload… or the mic recorder"));
@@ -1204,6 +1206,73 @@ function attachTimeline(node) {
                 row.addEventListener("click", () => { closeModal(); onPick(f); });
                 list.appendChild(row);
             }
+            webBtn.addEventListener("click", () => {
+                list.textContent = "";
+                const bar = el("div", { display: "flex", gap: "8px", padding: "6px 8px" });
+                const out = el("div", { overflowY: "auto" });
+                const q = el("input");
+                q.placeholder = "search free sounds… (Enter)";
+                Object.assign(q.style, {
+                    flex: "1", background: COL.input, color: COL.bright,
+                    border: `1px solid ${COL.border}`, borderRadius: "3px",
+                    padding: "4px 8px", fontSize: "12px",
+                });
+                q.addEventListener("keydown", async (ev) => {
+                    ev.stopPropagation();
+                    if (ev.key !== "Enter" || !q.value.trim()) return;
+                    out.textContent = "";
+                    out.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "6px 8px" }, "searching…"));
+                    try {
+                        const results = await webSearch(q.value.trim(), "audio", 1);
+                        out.textContent = "";
+                        if (!results.length) {
+                            out.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "6px 8px" }, "no results"));
+                            return;
+                        }
+                        for (const res of results) {
+                            const row = el("div", {
+                                display: "flex", alignItems: "center", gap: "10px",
+                                padding: "5px 8px", borderRadius: "4px",
+                            });
+                            row.append(el("span", { color: COL.green }, "♪"),
+                                el("span", { color: COL.bright, fontSize: "12px", flex: "1",
+                                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                                    (res.title || "untitled")
+                                    + (res.duration ? ` (${Math.round(res.duration)}s)` : "")),
+                                el("span", { color: "#666", fontSize: "10px", whiteSpace: "nowrap" },
+                                    res.license + (res.creator ? " · " + res.creator.slice(0, 16) : "")));
+                            const play = el("audio");
+                            play.controls = true;
+                            play.preload = "none";
+                            play.src = res.url;
+                            Object.assign(play.style, { height: "26px", width: "170px" });
+                            const add = el("button", { ...btnStyle, color: COL.green, padding: "2px 10px" }, "add");
+                            add.addEventListener("click", async () => {
+                                add.disabled = true;
+                                add.textContent = "…";
+                                try {
+                                    const name = await webFetch(res, "audio");
+                                    closeModal();
+                                    onPick(name);
+                                } catch (e) {
+                                    add.disabled = false;
+                                    add.textContent = "add";
+                                    toast("download failed: " + e.message, true);
+                                }
+                            });
+                            row.append(play, add);
+                            out.appendChild(row);
+                        }
+                    } catch (e) {
+                        out.textContent = "";
+                        out.appendChild(el("div", { color: COL.red, fontSize: "12px", padding: "6px 8px" },
+                            "search failed: " + e.message));
+                    }
+                });
+                bar.appendChild(q);
+                list.append(bar, out);
+                q.focus();
+            });
             panel.append(head, list);
             root.appendChild(panel);
         });
@@ -1498,6 +1567,25 @@ function attachTimeline(node) {
         toast(missing.length
             ? "setup loaded — but it used sockets not connected here: " + missing.join(", ")
             : "setup loaded", missing.length > 0);
+    }
+
+    async function webSearch(q, kind, page) {
+        const r = await api.fetchApi("/h3guide/websearch?q=" + encodeURIComponent(q)
+            + "&kind=" + kind + "&page=" + (page || 1));
+        const j = await r.json();
+        if (j.error) throw new Error(j.error);
+        return j.results || [];
+    }
+    async function webFetch(res, kind) {
+        const ps = new URLSearchParams({ url: res.url, kind, title: res.title,
+            creator: res.creator, license: res.license, source: res.source, id: res.id });
+        const r = await api.fetchApi("/h3guide/webfetch?" + ps.toString());
+        const j = await r.json();
+        if (j.error) throw new Error(j.error);
+        toast(`pulled "${(res.title || j.name).slice(0, 40)}" — ${res.license}`
+            + (res.creator ? ` by ${res.creator}` : "")
+            + " · credit logged to input/web/credits.txt");
+        return j.name;
     }
 
     function toast(msg, warn) {
@@ -1996,7 +2084,13 @@ function attachTimeline(node) {
                 border: `1px solid ${COL.border}`, borderRadius: "3px",
                 padding: "3px 8px", fontSize: "12px",
             });
-            search.addEventListener("keydown", (ev) => ev.stopPropagation());
+            search.addEventListener("keydown", (ev) => {
+                ev.stopPropagation();
+                if (ev.key === "Enter" && webMode && search.value.trim()) {
+                    webQ = search.value.trim();
+                    runWebSearch(false);
+                }
+            });
             // folder dropdown (input tab lists subfolders; output is flat)
             const folderSel = el("select", {
                 background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
@@ -2049,6 +2143,86 @@ function attachTimeline(node) {
                 } catch (e) { /* storage unavailable */ }
                 styleFav();
             });
+            let webMode = false, webQ = "", webPage = 1, webAcc = [];
+            const webBtn = el("button", btnStyle, "🌐 web…");
+            webBtn.title = "search free Creative Commons images (Openverse, commercial-use licenses) and pull them straight into the input folder";
+            webBtn.addEventListener("click", () => {
+                webMode = !webMode;
+                webBtn.style.color = webMode ? COL.mid : COL.bright;
+                webBtn.style.borderColor = webMode ? COL.mid : COL.border;
+                folderSel.style.display = webMode ? "none" : "";
+                favBtn.style.display = webMode ? "none" : "";
+                search.placeholder = webMode ? "search the free web… (Enter)" : "filter…";
+                if (webMode) {
+                    grid.textContent = "";
+                    grid.appendChild(el("div", { color: COL.text, fontSize: "12px" },
+                        "type a search and press Enter — results are Creative Commons, commercial-use licensed; picks download into input/web/"));
+                    search.value = "";
+                    search.focus();
+                } else {
+                    rebuildFolders();
+                    fill(search.value.trim().toLowerCase());
+                }
+            });
+            const webCell = (res) => {
+                const cell = el("div", { cursor: "pointer", textAlign: "center", width: "110px" });
+                const im = el("img");
+                im.loading = "lazy";
+                im.src = res.thumb || res.url;
+                Object.assign(im.style, {
+                    width: "110px", height: "74px", objectFit: "cover",
+                    borderRadius: "4px", border: `1px solid ${COL.border}`, display: "block",
+                });
+                cell.append(im,
+                    el("div", { color: COL.text, fontSize: "10px", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                        res.title || "untitled"),
+                    el("div", { color: "#666", fontSize: "9px", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                        res.license + (res.creator ? " · " + res.creator : "")));
+                cell.title = `${res.title}
+${res.width}×${res.height} · ${res.license}`
+                    + (res.creator ? ` by ${res.creator}` : "");
+                cell.addEventListener("click", async () => {
+                    cell.style.opacity = "0.4";
+                    try {
+                        const name = await webFetch(res, "images");
+                        closeModal();
+                        onPick(name);
+                    } catch (e) {
+                        cell.style.opacity = "1";
+                        toast("download failed: " + e.message, true);
+                    }
+                });
+                return cell;
+            };
+            const runWebSearch = async (append) => {
+                if (!append) {
+                    webPage = 1; webAcc = [];
+                    grid.textContent = "";
+                    grid.appendChild(el("div", { color: COL.text, fontSize: "12px" }, "searching…"));
+                }
+                try {
+                    const results = await webSearch(webQ, "images", webPage);
+                    if (!webMode) return;
+                    webAcc = webAcc.concat(results);
+                    grid.textContent = "";
+                    if (!webAcc.length) {
+                        grid.appendChild(el("div", { color: COL.text, fontSize: "12px" }, "no results"));
+                        return;
+                    }
+                    for (const res of webAcc) grid.appendChild(webCell(res));
+                    if (results.length >= 24) {
+                        const more = el("button", { ...btnStyle, alignSelf: "center" }, "more…");
+                        more.addEventListener("click", () => { webPage++; runWebSearch(true); });
+                        grid.appendChild(more);
+                    }
+                } catch (e) {
+                    grid.textContent = "";
+                    grid.appendChild(el("div", { color: COL.red, fontSize: "12px" },
+                        "search failed: " + e.message));
+                }
+            };
             const up = el("button", btnStyle, "upload…");
             const fileInput = el("input");
             fileInput.type = "file";
@@ -2069,7 +2243,7 @@ function attachTimeline(node) {
             });
             const closeB = el("button", btnStyle, "✕");
             closeB.addEventListener("click", closeModal);
-            head.append(tabIn, tabOut, folderSel, favBtn, search, up, fileInput, closeB);
+            head.append(tabIn, tabOut, folderSel, favBtn, webBtn, search, up, fileInput, closeB);
             styleTabs();
             rebuildFolders();
 
@@ -2116,7 +2290,7 @@ function attachTimeline(node) {
                     grid.appendChild(cell);
                 }
             };
-            search.addEventListener("input", () => fill(search.value.trim().toLowerCase()));
+            search.addEventListener("input", () => { if (!webMode) fill(search.value.trim().toLowerCase()); });
             fill("");
             panel.append(head, caption, grid);
             root.appendChild(panel);
