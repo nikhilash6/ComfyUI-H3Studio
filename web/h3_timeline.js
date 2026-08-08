@@ -3766,6 +3766,11 @@ function attachTimeline(node) {
                 if (present) {
                     hits.push({ x: x - 8, y: T.ky - h - 12, w: 16, h: 16, kind: "stem", selKind, selIdx });
                     hits.push({ x: x - 9, y: T.ky - 9, w: 18, h: 18, kind: "marker", selKind, selIdx });
+                } else if (selKind === "first" || selKind === "last") {
+                    // a dim stem used to be a dead zone — clicking it now offers
+                    // to CREATE the missing frame instead of silently ignoring you
+                    hits.push({ x: x - 9, y: T.ky - h - 12, w: 18, h: T.ky - (T.ky - h - 12) + 9,
+                        kind: "ghostcap", selKind });
                 }
             };
 
@@ -3861,6 +3866,13 @@ function attachTimeline(node) {
             }
             if (!h) { state.sel = null; fill(); return; }
             track.setPointerCapture(ev.pointerId);
+            if (h.kind === "ghostcap") {
+                openPicker((n) => {
+                    setWidget(h.selKind + "_frame_file", n);
+                    refresh(true);
+                });
+                return;
+            }
             if (h.kind === "marker") {
                 state.sel = h.selIdx != null ? { kind: h.selKind, i: h.selIdx } : { kind: h.selKind };
                 if (h.selKind === "mid")
