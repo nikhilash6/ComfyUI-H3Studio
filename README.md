@@ -299,23 +299,27 @@ stock.
 ## How it works
 
 H3 feeds keyframes to the DiT as **condition rows** that ride through every
-sampling step and are never denoised. The node dilutes each keyframe's condition
-latent before it's attached to the conditioning:
+sampling step and are never denoised. For a strength `s < 1` the node blends the
+keyframe's condition latent toward noise with the **linear flow-forward** form —
+the same maths as core's global noise aug:
 
 ```
-z' = s·z + √(1 − s²)·noise
+z' = a·z + (1 − a)·noise,     a = s · 0.999
 ```
 
-That's a **variance-preserving** blend, deliberately not the linear
-`s·z + (1−s)·noise` the core uses for its global noise aug. The core can be
-linear because it also relabels the condition row's timestep to match the noise
-level. We can't relabel per keyframe — both keyframes share the same `cond`
-segment kind — so the row is still read as near-clean. Preserving unit variance
-means it reads as a properly-exposed noisy frame rather than a washed-out one,
-which is what stops low strengths producing flat, grey endings.
+— and, via a per-row patch of the model's timestep table, **relabels that row's
+modulation timestep to `a`**. That relabeling is the whole trick: the model was
+trained on references at every noise level, so a 0.65 keyframe now reads as "a
+reference at noise level 0.65" (in-distribution, soft guidance) instead of "a
+clean image that happens to be full of static" (which it dutifully painted into
+the clip as distortion — the earlier behavior). Each keyframe and reference
+carries its own label, which core's single global knob cannot do.
 
-Correlation with the original latent tracks `s` linearly, so the dial is
-perceptually even across its range.
+When the label patch can't install (core drift upstream, or the turbo LoRA,
+whose rebuilt modulation table maps rows by kind), the node falls back to the
+linear blend with the global label — noticeably better than the old
+variance-preserving blend, but softer strengths may still drift; the log says
+when this happens.
 
 Each frame gets its **own noise stream**. Core reuses a single stream for every
 condition latent, which is harmless when only one is diluted — but weaken both
@@ -395,11 +399,11 @@ a subject out of a busy photograph.
 
 H3 has no native masked-reference mechanism — a reference block carries only
 `{kind, latent_h, latent_w, latent}` and attention runs with `mask=None`. What this
-does instead is make the strength dial **spatial**: the same variance-preserving
-blend, with a per-latent-position value rather than one number.
+does instead is make the strength dial **spatial**: the same linear blend, with
+a per-latent-position value rather than one number.
 
 ```
-z' = s·z + √(1−s²)·noise      # s is now a map, not a scalar
+z' = s·z + (1−s)·noise        # s is now a map, not a scalar
 ```
 
 Mask and `ref_spec` strength **compose** — a white mask at strength `0.6` gives 0.6

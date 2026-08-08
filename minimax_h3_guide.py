@@ -17,13 +17,18 @@ single global value, so it cannot weaken one keyframe without equally weakening 
 other. This node instead dilutes each keyframe's condition latent directly, before
 it is attached to the conditioning, with an independent dial per frame.
 
-The blend is variance-preserving:
+The blend is LINEAR (the flow-matching forward process, same form as core's
+global aug):
 
-    z' = s*z + sqrt(1 - s^2) * noise        for s <= 1
+    z' = a*z + (1 - a) * noise,   a = s * VISUAL_COND_TIMESTEP,   for s <= 1
 
-rather than the linear `s*z + (1-s)*noise` the core uses for its global aug. The
-core is linear because that matches the flow-matching forward process, and it
-relabels the condition row's timestep to match. We cannot relabel per keyframe
+and — via h3_row_aug_patch — each row's modulation timestep is relabeled to `a`,
+exactly as core does for its global knob. The model then reads a softened
+keyframe as "a reference at noise level a" (in-distribution) rather than "a
+clean image full of static" (the old variance-preserving blend without
+relabeling, which caused visible distortion at sub-1.0 strengths). When the
+label patch cannot install (core drift, turbo LoRA), we fall back to the
+linear blend with the global label -- degraded but sane. We could not relabel per keyframe
 (both keyframes share the "cond" segment kind), so the model still reads this row
 as near-clean. Keeping unit variance means it reads as a properly-exposed noisy
 frame instead of a washed-out one, which avoids low-contrast endings.
@@ -43,7 +48,12 @@ import nodes
 import node_helpers
 from comfy_api.latest import ComfyExtension, io, InputImpl
 
-from . import extra_conds_patch, middle_frame_patch, turbo_compat
+from . import extra_conds_patch, h3_row_aug_patch, middle_frame_patch, turbo_compat
+
+try:
+    from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP as _VIS_T
+except Exception:  # core moved the constant; 0.999 is its long-standing value
+    _VIS_T = 0.999
 from .load_image_zoom_pan import crop_box
 
 FPS_HINT = 24  # for the "at N.N seconds" prompt labels only
@@ -291,7 +301,7 @@ def weaken_cond_latent_masked(z, strength_map, seed):
     gen = torch.Generator("cpu").manual_seed(int(seed))
     noise = torch.randn(z.shape, generator=gen, dtype=torch.float32).to(z.device)
     keep = s.clamp(max=1.0)
-    return s * z + torch.sqrt((1.0 - keep * keep).clamp(min=0.0)) * noise
+    return s * z + (1.0 - keep) * noise
 
 
 def load_input_video(name, field, max_seconds=REF_VIDEO_MAX_SECONDS):
@@ -522,6 +532,11 @@ def beat_spans(text_ids, full_prompt, fragments):
 def weaken_cond_latent(z, strength, seed=LAST_FRAME_NOISE_SEED):
     """Dilute a condition latent toward noise. 1.0 = untouched, 0.0 = pure noise.
 
+    LINEAR blend s*z + (1-s)*noise — the flow-matching forward process, the same
+    form core's global noise-aug uses. (The earlier variance-preserving sphere
+    blend put sqrt(1-s^2) of noise power in the row — at 0.65 that is 76% noise
+    instead of 35%, which the model happily painted as texture distortion.)
+
     Above 1.0 the latent is amplified instead (no noise added), overdriving the
     model's pull toward the frame.
     """
@@ -530,7 +545,34 @@ def weaken_cond_latent(z, strength, seed=LAST_FRAME_NOISE_SEED):
     z = z.to(torch.float32)
     gen = torch.Generator("cpu").manual_seed(int(seed))
     noise = torch.randn(z.shape, generator=gen, dtype=torch.float32)
-    return strength * z + math.sqrt(max(0.0, 1.0 - strength * strength)) * noise.to(z.device)
+    return strength * z + (1.0 - strength) * noise.to(z.device)
+
+
+def flow_blend(z, a, seed):
+    """a*z + (1-a)*noise: the flow forward at time a, role-pinned seed.
+
+    Used with the per-row label patch: the row's modulation timestep becomes a,
+    so the model reads the noise as UNCERTAINTY (in-distribution) instead of
+    content. a = strength * VISUAL_COND_TIMESTEP.
+    """
+    if a >= 1.0:
+        return z
+    z = z.to(torch.float32)
+    gen = torch.Generator("cpu").manual_seed(int(seed))
+    noise = torch.randn(z.shape, generator=gen, dtype=torch.float32)
+    return a * z + (1.0 - a) * noise.to(z.device)
+
+
+def row_aug_ready():
+    """Per-row labels need the source patch and are disabled under the turbo
+    LoRA (its rebuilt adaln table maps rows by kind, not per segment)."""
+    if turbo_compat.turbo_present():
+        if not getattr(row_aug_ready, "_warned", False):
+            row_aug_ready._warned = True
+            logging.info("MiniMaxH3Guide: turbo LoRA active -- sub-1.0 strengths "
+                         "use the blended fallback (labels stay global).")
+        return False
+    return h3_row_aug_patch.install()
 
 
 class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
@@ -905,7 +947,11 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 mask = apply_crop(m3[:1].unsqueeze(-1), ref_crops[n]).squeeze(-1)
             seed = REF_NOISE_SEED_BASE + n
             if mask is None:
-                block["latent"] = weaken_cond_latent(block["latent"], strength, seed)
+                if strength < 1.0 and row_aug_ready():
+                    block["noise_aug"] = strength * _VIS_T
+                    block["latent"] = flow_blend(block["latent"], block["noise_aug"], seed)
+                else:
+                    block["latent"] = weaken_cond_latent(block["latent"], strength, seed)
             else:
                 if float(mask.max()) <= 0.0:
                     logging.warning(
@@ -915,6 +961,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                         slot, n + 1)
                 # scalar strength scales the whole map, so mask and strength compose
                 smap = mask_to_latent_grid(mask, block["latent_h"], block["latent_w"]) * strength
+                if strength < 1.0 and row_aug_ready():
+                    block["noise_aug"] = strength * _VIS_T   # label only; map does the blend
                 block["latent"] = weaken_cond_latent_masked(block["latent"], smap, seed)
                 if mask_ref_pixels:
                     m = mask_to_pixel_grid(mask, resized.shape[1], resized.shape[2])
@@ -964,8 +1012,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             has_snd, vitem, block = encode_ref_video(vae, audio_vae, framesv, snd,
                                                      frame_count, ref_video_megapixels,
                                                      "reference video %d" % (n + 1))
-            block["latent"] = weaken_cond_latent(block["latent"], strength,
-                                                 REF_VIDEO_NOISE_SEED_BASE + n)
+            if strength < 1.0 and row_aug_ready():
+                block["noise_aug"] = strength * _VIS_T
+                block["latent"] = flow_blend(block["latent"], block["noise_aug"],
+                                             REF_VIDEO_NOISE_SEED_BASE + n)
+            else:
+                block["latent"] = weaken_cond_latent(block["latent"], strength,
+                                                     REF_VIDEO_NOISE_SEED_BASE + n)
             if block["audio_latent"] is not None:
                 block["audio_latent"] = weaken_cond_latent(
                     block["audio_latent"], strength, REF_VIDEO_AUDIO_NOISE_SEED_BASE + n)
@@ -1083,7 +1136,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         if keyframes:
             for kf in keyframes:
                 z = vae.encode(kf.pop("image"))
-                kf["latent"] = weaken_cond_latent(z, kf.pop("strength"), kf.pop("noise_seed"))
+                s = kf.pop("strength")
+                seed = kf.pop("noise_seed")
+                if s < 1.0 and row_aug_ready():
+                    kf["noise_aug"] = s * _VIS_T
+                    kf["latent"] = flow_blend(z, kf["noise_aug"], seed)
+                else:
+                    kf["latent"] = weaken_cond_latent(z, s, seed)
             cond = node_helpers.conditioning_set_values(cond, {
                 "minimax_keyframes": keyframes,
                 "minimax_frame_count": frame_count,

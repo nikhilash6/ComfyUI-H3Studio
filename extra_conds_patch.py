@@ -138,6 +138,18 @@ def _patched_extra_conds(self, **kwargs):
         return out
 
     merge_cond_latents(payload)
+
+    # per-row noise-aug labels: rows are keyframes-then-refs, matching the
+    # cond_video_latents order (merged above, or core's own single-type
+    # assignment). Entries without a label default to the global value.
+    _kfs = payload.get("keyframes") or []
+    _refs = [r for r in (payload.get("refs") or []) if "latent" in r]
+    if any("noise_aug" in e for e in _kfs) or any("noise_aug" in e for e in _refs):
+        _v = _mmm.VISUAL_COND_TIMESTEP
+        payload["cond_video_noise_augs"] = (
+            [float(k.get("noise_aug", _v)) for k in _kfs]
+            + [float(r.get("noise_aug", _v)) for r in _refs])
+
     layout0 = payload.get("layout")
     keyframes = payload.get("keyframes")
     if layout0 is not None and keyframes:
