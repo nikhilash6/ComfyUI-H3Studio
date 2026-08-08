@@ -2226,6 +2226,13 @@ function attachTimeline(node) {
             setWidget("prompt", promptTA.value);
         };
         // small shared control builders for section-header settings
+        // the tag you actually type in the prompt, shown under each thumbnail
+        const tagCaption = (text, color) => el("div", {
+            color, fontFamily: "monospace", fontSize: "11px", textAlign: "center",
+            padding: "1px 0 2px", background: "#101010", letterSpacing: "0.03em",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        }, text);
+
         const miniSelect = (widget, options, tooltip) => {
             const s = el("select", {
                 background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
@@ -2684,7 +2691,7 @@ function attachTimeline(node) {
             flex: "0 0 auto", borderTop: `1px solid ${COL.divider}`, padding: "6px 16px",
             fontSize: "12px", color: COL.text,
         });
-        main.append(promptHead, promptTA, chipRow, v2vBar, stripHead, strip, trackHead, track,
+        main.append(promptHead, chipRow, promptTA, v2vBar, stripHead, strip, trackHead, track,
             refsHead, refsRow, vidHead, vidRow, audioHead, audioRow, helpStrip);
         body.append(main, inspector);
         root.append(header, body);
@@ -2825,7 +2832,8 @@ function attachTimeline(node) {
                 }, entity.desc));
             if (entity.kind === "mid" && state.midsAuto)
                 foot.appendChild(el("div", { color: COL.text, fontSize: "10px" }, "AUTO — drag to own it"));
-            c.append(th, foot);
+            c.append(th, tagCaption(`<Picture ${entity.pic}>`,
+                entity.kind === "mid" ? COL.mid : COL.cap), foot);
             c.addEventListener("click", () => {
                 state.sel = entity.kind === "mid" ? { kind: "mid", i: entity.i } : { kind: entity.kind };
                 fill();
@@ -2900,7 +2908,7 @@ function attachTimeline(node) {
                 row3.appendChild(x);
             }
             foot.append(row1, slider, row3);
-            c.append(th, foot);
+            c.append(th, tagCaption(`<Picture ${r._pic}>`, COL.green), foot);
             c.addEventListener("click", () => { state.sel = { kind: "ref", i }; fill(); });
             th.addEventListener("dblclick", () => openLightbox(refImg(r)));
             c.addEventListener("contextmenu", (ev) => {
@@ -3911,7 +3919,8 @@ function attachTimeline(node) {
                         foot.appendChild(info);
                     }
                 }
-                c.append(foot);
+                c.append(tagCaption(`<Video ${num}>` + (aNum ? ` · ♪ <Audio ${aNum}>` : ""),
+                    COL.green), foot);
                 vidRow.appendChild(c);
             });
             const addV = el("button", btnStyle, "+ video…");
