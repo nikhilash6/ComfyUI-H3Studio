@@ -85,8 +85,8 @@ def register():
         params = {
             "q": q, "page_size": "24",
             "page": page if page.isdigit() else "1",
-            # commercial-use licenses only, so anything picked is safe to build on
-            "license_type": "commercial",
+            # no license prefilter: every CC/PD result shows, with its license
+            # on the card and in credits.txt — the call is the user's
         }
         try:
             timeout = aiohttp.ClientTimeout(total=20)

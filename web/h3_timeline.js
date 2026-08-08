@@ -1166,7 +1166,7 @@ function attachTimeline(node) {
             head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
                 "Pick reference audio"));
             const webBtn = el("button", btnStyle, "🌐 web…");
-            webBtn.title = "search free Creative Commons sounds (Openverse: Freesound/Jamendo, commercial-use licenses) and pull them into the input folder";
+            webBtn.title = "search free Creative Commons sounds (Openverse: Freesound/Jamendo, all licenses — each result shows its own) and pull them into the input folder";
             const up = el("button", btnStyle, "upload…");
             const fi = el("input");
             fi.type = "file";
@@ -2145,7 +2145,7 @@ function attachTimeline(node) {
             });
             let webMode = false, webQ = "", webPage = 1, webAcc = [];
             const webBtn = el("button", btnStyle, "🌐 web…");
-            webBtn.title = "search free Creative Commons images (Openverse, commercial-use licenses) and pull them straight into the input folder";
+            webBtn.title = "search free Creative Commons images (Openverse, all licenses — each result shows its own) and pull them straight into the input folder";
             webBtn.addEventListener("click", () => {
                 webMode = !webMode;
                 webBtn.style.color = webMode ? COL.mid : COL.bright;
@@ -2156,7 +2156,7 @@ function attachTimeline(node) {
                 if (webMode) {
                     grid.textContent = "";
                     grid.appendChild(el("div", { color: COL.text, fontSize: "12px" },
-                        "type a search and press Enter — results are Creative Commons, commercial-use licensed; picks download into input/web/"));
+                        "type a search and press Enter — results are Creative Commons / public domain (license shown per result); picks download into input/web/"));
                     search.value = "";
                     search.focus();
                 } else {
