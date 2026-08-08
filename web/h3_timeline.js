@@ -2346,6 +2346,294 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
             v2vScrub, v2vFrame, ghostWrap, v2vPick, v2vClear, v2vDenoise);
 
+        // ---- motion path: Ken Burns through the model -----------------------
+        // Two windows (A=start, B=end) over one image; the chosen curve places
+        // N tween waypoints automatically — same file, interpolated framings —
+        // so the camera path AND speed are pinned while the model adds life.
+        const MP_EASE = {
+            "linear": (t) => t,
+            "ease-in-out": (t) => t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2,
+            "ease-in": (t) => t * t,
+            "ease-out": (t) => 1 - (1 - t) * (1 - t),
+        };
+        function mpLerpWin(A, B, u) {
+            return { cx: A.cx + (B.cx - A.cx) * u,
+                     cy: A.cy + (B.cy - A.cy) * u,
+                     // geometric zoom: linear lerp reads as acceleration
+                     z: Math.exp(Math.log(A.z) + (Math.log(B.z) - Math.log(A.z)) * u) };
+        }
+        function placeMotionPath(name, A, B, count, easeName, strength) {
+            if (inputConnected(node, "first_frame") || inputConnected(node, "last_frame")) {
+                toast("first/last frame sockets are connected and win over file inputs — disconnect them to place a motion path", true);
+                return false;
+            }
+            if (state.midSpecError) {
+                toast("fix the middle spec error first (✎ raw text specs) — placing a path now would overwrite your lines", true);
+                return false;
+            }
+            const F = fc();
+            const existing = connectedSlots(node, "middle_frame_").length
+                + fileLinesOf("middle_frame_files").length;
+            if (existing + count > Math.max(1, F - 2)) {
+                toast(`clip too short for ${count} more waypoint(s) at this length`, true);
+                return false;
+            }
+            const E = MP_EASE[easeName] || MP_EASE["ease-in-out"];
+            setWidget("first_frame_file", name);
+            setWidget("first_frame_crop", formatCropSpec([A]));
+            setWidget("last_frame_file", name);
+            setWidget("last_frame_crop", formatCropSpec([B]));
+            // batched writes (per-item adds would refresh between and clobber)
+            const lines = fileLinesOf("middle_frame_files");
+            const ents = state.mids.map((m) => ({ frac: m.frac, strength: m.strength, desc: m.desc }));
+            const crops = state.midCrops.slice();
+            for (let i = 0; i < count; i++) {
+                const frac = (i + 1) / (count + 1);           // even in TIME…
+                const win = mpLerpWin(A, B, E(frac));          // …curve moves the WINDOW
+                lines.push(name);
+                ents.push({ frac, strength, desc: "" });
+                crops.push(win);
+            }
+            setWidget("middle_frame_files", lines.join("\n"));
+            setWidget("middle_frame_spec", formatMiddleSpec(ents, F));
+            setWidget("middle_frame_crops", formatCropSpec(crops));
+            refresh(true);
+            toast(`motion path placed — ${count} tween waypoint(s), ${easeName}, strength ${strength.toFixed(2)}. Drag any waypoint to hand-tune the curve.`);
+            return true;
+        }
+        function openMotionPath() {
+            openPicker((name) => {
+                const img = cachedImg(name);
+                if (!img) {   // still decoding — retry briefly
+                    const wait = () => cachedImg(name) ? mpModal(name, cachedImg(name)) : setTimeout(wait, 200);
+                    setTimeout(wait, 150);
+                    return;
+                }
+                mpModal(name, img);
+            });
+        }
+        function mpModal(name, img) {
+            const [oW, oH] = outWH();
+            // seed from existing framings when re-opening on the same image
+            let A = (String(widgetValue(node, "first_frame_file", "")).trim() === name && state.firstCrop)
+                ? { ...state.firstCrop } : { cx: 0.3, cy: 0.5, z: 1.0 };
+            let B = (String(widgetValue(node, "last_frame_file", "")).trim() === name && state.lastCrop)
+                ? { ...state.lastCrop } : { cx: 0.7, cy: 0.5, z: 1.0 };
+            let active = "A";
+            let anim = null;
+            openModal((root) => {
+                const panel = el("div", {
+                    background: COL.bg, border: `1px solid ${COL.border}`, borderRadius: "8px",
+                    display: "flex", flexDirection: "column", overflow: "hidden",
+                    fontFamily: "sans-serif", maxWidth: "94vw", maxHeight: "94vh",
+                });
+                const head = el("div", {
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
+                });
+                head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
+                    `Motion path — drag the A (start) and B (end) windows, wheel zooms · both locked to ${oW}×${oH}`));
+                const closeB = el("button", btnStyle, "✕");
+                closeB.addEventListener("click", closeModal);
+                head.appendChild(closeB);
+
+                const body = el("div", { display: "flex", gap: "10px", padding: "10px" });
+                const cnv = el("canvas", { display: "block", cursor: "grab", touchAction: "none",
+                    borderRadius: "4px" });
+                const maxW = Math.min(window.innerWidth * 0.66, 1100);
+                const maxH = Math.min(window.innerHeight * 0.72, 800);
+                const fit = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
+                const dw = Math.round(img.naturalWidth * fit), dh = Math.round(img.naturalHeight * fit);
+                cnv.style.width = dw + "px"; cnv.style.height = dh + "px";
+                const dpr = window.devicePixelRatio || 1;
+                cnv.width = Math.round(dw * dpr); cnv.height = Math.round(dh * dpr);
+
+                const side = el("div", { display: "flex", flexDirection: "column", gap: "10px", width: "220px" });
+                const lens = el("canvas", { display: "block", borderRadius: "4px", background: "#000",
+                    border: `1px solid ${COL.border}` });
+                lens.width = 352; lens.height = 198;
+                lens.style.width = "176px"; lens.style.height = "99px";
+                side.appendChild(el("div", { color: COL.text, fontSize: "11px" }, "through the lens:"));
+                side.appendChild(lens);
+                const mkRow = (label, ctl) => {
+                    const r = el("div", { display: "flex", alignItems: "center", gap: "8px" });
+                    r.append(el("span", { color: COL.text, fontSize: "12px", width: "72px" }, label), ctl);
+                    return r;
+                };
+                const cntSel = el("select", {
+                    background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
+                    borderRadius: "3px", fontSize: "13px", padding: "3px 8px", cursor: "pointer",
+                });
+                for (const n of [2, 3, 4, 5, 6, 7, 8]) {
+                    const o = el("option", null, String(n)); o.value = String(n); cntSel.appendChild(o);
+                }
+                cntSel.value = "4";
+                const easeSel = el("select", {
+                    background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
+                    borderRadius: "3px", fontSize: "13px", padding: "3px 8px", cursor: "pointer",
+                });
+                for (const k of Object.keys(MP_EASE)) {
+                    const o = el("option", null, k); o.value = k; easeSel.appendChild(o);
+                }
+                easeSel.value = "ease-in-out";
+                const strSl = el("input");
+                strSl.type = "range"; strSl.min = "0.2"; strSl.max = "1"; strSl.step = "0.05"; strSl.value = "0.55";
+                Object.assign(strSl.style, { flex: "1", accentColor: COL.mid, cursor: "pointer" });
+                const strVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" }, "0.55");
+                strSl.addEventListener("input", () => strVal.textContent = Number(strSl.value).toFixed(2));
+                const strRow = el("div", { display: "flex", alignItems: "center", gap: "8px" });
+                strRow.append(el("span", { color: COL.text, fontSize: "12px", width: "72px" }, "strength"), strSl, strVal);
+                const hint = el("div", { color: "#666", fontSize: "11px", lineHeight: "1.45" },
+                    "low strength = the model adds parallax and life along your path; high = a mechanical crop-pan. Ends anchor at the first/last frame strengths.");
+                const prevB = el("button", btnStyle, "▶ preview move");
+                const placeB = el("button", { ...btnStyle, color: COL.green }, "✦ place on timeline");
+                side.append(mkRow("waypoints", cntSel), mkRow("curve", easeSel), strRow, prevB, placeB, hint);
+                body.append(cnv, side);
+                panel.append(head, body);
+                root.appendChild(panel);
+
+                const ctx = cnv.getContext("2d");
+                const winRect = (w) => {
+                    const b = cropBoxJS(img.naturalWidth, img.naturalHeight, oW, oH, w.z, w.cx, w.cy);
+                    const k = cnv.width / img.naturalWidth;
+                    return { x: b.x * k, y: b.y * k, w: b.w * k, h: b.h * k, src: b };
+                };
+                const drawLens = (w) => {
+                    const b = cropBoxJS(img.naturalWidth, img.naturalHeight, oW, oH, w.z, w.cx, w.cy);
+                    const lc = lens.getContext("2d");
+                    lc.drawImage(img, b.x, b.y, b.w, b.h, 0, 0, lens.width, lens.height);
+                };
+                const draw = (movingWin) => {
+                    ctx.clearRect(0, 0, cnv.width, cnv.height);
+                    ctx.drawImage(img, 0, 0, cnv.width, cnv.height);
+                    ctx.fillStyle = "rgba(0,0,0,0.45)";
+                    ctx.fillRect(0, 0, cnv.width, cnv.height);
+                    for (const [w2, tag, color] of [[A, "A", COL.cap], [B, "B", COL.green]]) {
+                        const r = winRect(w2);
+                        ctx.drawImage(img,
+                            r.src.x, r.src.y, r.src.w, r.src.h, r.x, r.y, r.w, r.h);
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = active === tag && !movingWin ? 3 : 1.5;
+                        ctx.setLineDash(active === tag && !movingWin ? [8, 5] : []);
+                        ctx.strokeRect(r.x, r.y, r.w, r.h);
+                        ctx.setLineDash([]);
+                        ctx.font = "bold 16px monospace";
+                        ctx.fillStyle = color;
+                        ctx.fillText(tag, r.x + 8, r.y + 22);
+                    }
+                    // the path the window's CENTER travels
+                    const ra = winRect(A), rb = winRect(B);
+                    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+                    ctx.setLineDash([4, 6]);
+                    ctx.beginPath();
+                    ctx.moveTo(ra.x + ra.w / 2, ra.y + ra.h / 2);
+                    ctx.lineTo(rb.x + rb.w / 2, rb.y + rb.h / 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    // tween markers along the curve
+                    const E = MP_EASE[easeSel.value];
+                    const n = parseInt(cntSel.value, 10);
+                    for (let i = 1; i <= n; i++) {
+                        const w2 = mpLerpWin(A, B, E(i / (n + 1)));
+                        const r = winRect(w2);
+                        ctx.fillStyle = COL.mid;
+                        ctx.beginPath();
+                        ctx.arc(r.x + r.w / 2, r.y + r.h / 2, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    if (movingWin) {
+                        const r = winRect(movingWin);
+                        ctx.strokeStyle = COL.sel;
+                        ctx.lineWidth = 2.5;
+                        ctx.strokeRect(r.x, r.y, r.w, r.h);
+                        drawLens(movingWin);
+                    } else {
+                        drawLens(active === "A" ? A : B);
+                    }
+                };
+                cntSel.addEventListener("change", () => draw());
+                easeSel.addEventListener("change", () => draw());
+
+                let dragW = null;
+                const evPt = (ev) => {
+                    const r = cnv.getBoundingClientRect();
+                    return { x: (ev.clientX - r.left) / r.width * cnv.width,
+                             y: (ev.clientY - r.top) / r.height * cnv.height };
+                };
+                const winAt = (p) => {
+                    const inside = (w2) => {
+                        const r = winRect(w2);
+                        return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+                    };
+                    const inA = inside(A), inB = inside(B);
+                    if (inA && inB) {   // overlapping: nearer center wins
+                        const ra = winRect(A), rb = winRect(B);
+                        const da = (p.x - ra.x - ra.w / 2) ** 2 + (p.y - ra.y - ra.h / 2) ** 2;
+                        const db = (p.x - rb.x - rb.w / 2) ** 2 + (p.y - rb.y - rb.h / 2) ** 2;
+                        return da <= db ? "A" : "B";
+                    }
+                    return inA ? "A" : inB ? "B" : null;
+                };
+                cnv.addEventListener("pointerdown", (ev) => {
+                    stopAnim();
+                    const p = evPt(ev);
+                    const tag = winAt(p);
+                    if (!tag) return;
+                    active = tag;
+                    const w2 = tag === "A" ? A : B;
+                    dragW = { tag, cx: w2.cx, cy: w2.cy, x0: p.x, y0: p.y };
+                    cnv.setPointerCapture(ev.pointerId);
+                    draw();
+                });
+                cnv.addEventListener("pointermove", (ev) => {
+                    if (!dragW) return;
+                    const p = evPt(ev);
+                    const w2 = dragW.tag === "A" ? A : B;
+                    w2.cx = Math.min(1, Math.max(0, dragW.cx + (p.x - dragW.x0) / cnv.width));
+                    w2.cy = Math.min(1, Math.max(0, dragW.cy + (p.y - dragW.y0) / cnv.height));
+                    draw();
+                });
+                const endW = (ev) => {
+                    if (!dragW) return;
+                    dragW = null;
+                    try { cnv.releasePointerCapture(ev.pointerId); } catch (e) { /* released */ }
+                };
+                cnv.addEventListener("pointerup", endW);
+                cnv.addEventListener("pointercancel", endW);
+                cnv.addEventListener("wheel", (ev) => {
+                    ev.preventDefault();
+                    stopAnim();
+                    const tag = winAt(evPt(ev)) || active;
+                    active = tag;
+                    const w2 = tag === "A" ? A : B;
+                    w2.z = Math.max(1, w2.z * Math.exp(-ev.deltaY * (ev.shiftKey ? 0.00015 : 0.0006)));
+                    draw();
+                }, { passive: false });
+
+                const stopAnim = () => {
+                    if (anim) { cancelAnimationFrame(anim); anim = null; prevB.textContent = "▶ preview move"; }
+                };
+                prevB.addEventListener("click", () => {
+                    if (anim) { stopAnim(); draw(); return; }
+                    prevB.textContent = "⏹ stop";
+                    const durMs = Math.min(6000, Math.max(1500, fc() / FPS * 1000));
+                    const t0 = performance.now();
+                    const stepA = (now) => {
+                        const t = ((now - t0) % durMs) / durMs;
+                        draw(mpLerpWin(A, B, MP_EASE[easeSel.value](t)));
+                        anim = requestAnimationFrame(stepA);
+                    };
+                    anim = requestAnimationFrame(stepA);
+                });
+                placeB.addEventListener("click", () => {
+                    stopAnim();
+                    if (placeMotionPath(name, A, B, parseInt(cntSel.value, 10),
+                        easeSel.value, Number(strSl.value))) closeModal();
+                });
+                draw();
+            }, () => { if (anim) cancelAnimationFrame(anim); });
+        }
+
         // scrub the v2v footage and set in/out points visually; widgets stay
         // the source of truth (every set writes v2v_start/end_seconds)
         function openV2vSection() {
@@ -2472,7 +2760,15 @@ function attachTimeline(node) {
             });
         }
 
-        const stripHead = el("div", sectionHeadStyle(), "KEYFRAMES — the images the clip passes through");
+        const stripHead = el("div", {
+            ...sectionHeadStyle(), display: "flex", justifyContent: "space-between",
+            gap: "16px", alignItems: "center",
+        });
+        stripHead.appendChild(el("span", null, "KEYFRAMES — the images the clip passes through"));
+        const pathBtn = el("button", btnStyle, "✦ motion path…");
+        pathBtn.title = "cinematic pan/zoom from ONE image: set a start and end window, pick a speed curve, and tween waypoints are placed on the timeline automatically";
+        pathBtn.addEventListener("click", () => openMotionPath());
+        stripHead.appendChild(pathBtn);
         const strip = el("div", {
             display: "flex", gap: "12px", padding: "8px 16px 16px", overflowX: "auto",
             flex: "0 0 auto", alignItems: "flex-start",

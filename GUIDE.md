@@ -13,6 +13,9 @@ Set the **last frame** card. Strength `1.0` = land exactly on it; `0.6–0.8` = 
 ### I want it to pass through an image mid-clip
 **+ waypoint** → pick the image → drag its marker along the track to the right moment (or double-click empty track space to drop one right there). Strength `0.6` is the sweet spot; add a short description on the card so the model knows what it's looking at.
 
+### I want a cinematic pan/zoom across one image (Ken Burns, but alive)
+**✦ motion path…** on the KEYFRAMES header → pick the image → drag the **A** (start) and **B** (end) windows, wheel to zoom them. Choose waypoint count and a **speed curve** (ease-in-out etc.) — tween waypoints are placed on the timeline automatically, windows extrapolated along the curve. **▶ preview move** shows the exact camera move before you spend a single step. Keep tween strength ~0.5 so the model adds parallax and life; drag any placed waypoint to hand-tune the timing.
+
 ### I want to describe what happens at a moment (no image)
 Click the **beats lane** under the track at the right moment, type the text — that's a **beat**. Leave `timed_text_mode` on `text only` first; try the rope modes only if plain timing doesn't steer. (A beat can be upgraded to a waypoint later — right-click it.)
 
