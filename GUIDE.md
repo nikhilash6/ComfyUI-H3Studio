@@ -25,6 +25,9 @@ Add their photos with **+ reference** (strength `1.0` locks identity, `0.7` = li
 ### I want a reference voice or sound
 **+ audio…** to load a file, or **● record mic** straight into the node. Say `<Audio 1>` in the prompt to invoke it. Max 3.
 
+### I want free images/sounds without leaving the editor
+Any picker → **🌐 web…** → type a search, press Enter. Results come from Openverse (Creative Commons, commercial-use licenses only) with license + creator shown; clicking one downloads it into `input/web/` and uses it immediately. Every pull is logged to `input/web/credits.txt` for attribution. Works in the image pickers and the audio picker (with preview players).
+
 ### I want motion/style from existing footage
 **+ video…** in VIDEO REFERENCES. Its soundtrack rides along automatically. Cap cost with `ref_video_megapixels` (e.g. `0.4`). Max 3.
 
