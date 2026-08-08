@@ -1926,8 +1926,14 @@ function attachTimeline(node) {
         } catch (e) { return []; /* upload still works */ }
     }
 
+    const FAV_KEY = "h3guide.favPath";
+    function readFav() {
+        try { return JSON.parse(localStorage.getItem(FAV_KEY)) || null; }
+        catch (e) { return null; }
+    }
     async function openPicker(onPick) {
-        let files = await fetchPickerFiles("input");
+        const fav = readFav();
+        let files = await fetchPickerFiles(fav?.tab === "output" ? "output" : "input");
         openModal((root) => {
             const panel = el("div", {
                 width: "min(980px, 92vw)", maxHeight: "84vh", background: COL.bg,
@@ -1938,13 +1944,16 @@ function attachTimeline(node) {
                 display: "flex", gap: "8px", alignItems: "center",
                 padding: "8px 10px", borderBottom: `1px solid ${COL.divider}`,
             });
-            let tab = "input";
+            let tab = fav?.tab === "output" ? "output" : "input";
+            let folder = fav?.tab === tab ? (fav?.folder || "") : "";
             const tabBtn = (name, label) => {
                 const b = el("button", { ...btnStyle }, label);
                 b.addEventListener("click", async () => {
                     tab = name;
+                    folder = "";
                     files = await fetchPickerFiles(tab);
                     styleTabs();
+                    rebuildFolders();
                     fill(search.value.trim().toLowerCase());
                 });
                 return b;
@@ -1965,6 +1974,58 @@ function attachTimeline(node) {
                 padding: "3px 8px", fontSize: "12px",
             });
             search.addEventListener("keydown", (ev) => ev.stopPropagation());
+            // folder dropdown (input tab lists subfolders; output is flat)
+            const folderSel = el("select", {
+                background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
+                borderRadius: "3px", fontSize: "12px", padding: "3px 6px",
+                cursor: "pointer", maxWidth: "180px",
+            });
+            const rebuildFolders = () => {
+                folderSel.textContent = "";
+                const dirs = new Set();
+                for (const f of files) {
+                    const clean = f.replace(/\s*\[\w+\]\s*$/, "");
+                    const slash = clean.lastIndexOf("/");
+                    if (slash > -1) dirs.add(clean.slice(0, slash));
+                }
+                const all = el("option", null, "all folders");
+                all.value = "";
+                folderSel.appendChild(all);
+                for (const d of [...dirs].sort()) {
+                    const o = el("option", null, "📁 " + d);
+                    o.value = d;
+                    folderSel.appendChild(o);
+                }
+                if (folder && ![...dirs].includes(folder)) folder = "";
+                folderSel.value = folder;
+                folderSel.style.display = dirs.size ? "" : "none";
+                styleFav();
+            };
+            folderSel.addEventListener("change", () => {
+                folder = folderSel.value;
+                styleFav();
+                fill(search.value.trim().toLowerCase());
+            });
+            // ⭐ favourite: remembers tab + folder, applied on every open
+            const favBtn = el("button", { ...btnStyle, padding: "3px 8px" }, "☆");
+            const styleFav = () => {
+                const f = readFav();
+                const here = f && f.tab === tab && (f.folder || "") === (folder || "");
+                favBtn.textContent = here ? "⭐" : "☆";
+                favBtn.style.color = here ? COL.mid : COL.text;
+                favBtn.title = here
+                    ? "this is your favourite location — the picker opens here. Click to clear."
+                    : "make this tab+folder the favourite location the picker opens at";
+            };
+            favBtn.addEventListener("click", () => {
+                const f = readFav();
+                const here = f && f.tab === tab && (f.folder || "") === (folder || "");
+                try {
+                    if (here) localStorage.removeItem(FAV_KEY);
+                    else localStorage.setItem(FAV_KEY, JSON.stringify({ tab, folder }));
+                } catch (e) { /* storage unavailable */ }
+                styleFav();
+            });
             const up = el("button", btnStyle, "upload…");
             const fileInput = el("input");
             fileInput.type = "file";
@@ -1985,8 +2046,9 @@ function attachTimeline(node) {
             });
             const closeB = el("button", btnStyle, "✕");
             closeB.addEventListener("click", closeModal);
-            head.append(tabIn, tabOut, search, up, fileInput, closeB);
+            head.append(tabIn, tabOut, folderSel, favBtn, search, up, fileInput, closeB);
             styleTabs();
+            rebuildFolders();
 
             const caption = el("div", {
                 padding: "6px 10px 0", color: COL.text, fontSize: "11px",
@@ -2001,7 +2063,13 @@ function attachTimeline(node) {
                     : "";
                 caption.style.display = tab === "output" ? "" : "none";
                 grid.textContent = "";
-                const match = files.filter((f) => !filter || f.toLowerCase().includes(filter));
+                const inFolder = (f) => {
+                    if (!folder) return true;
+                    const clean = f.replace(/\s*\[\w+\]\s*$/, "");
+                    return clean.startsWith(folder + "/");
+                };
+                const match = files.filter((f) => inFolder(f)
+                    && (!filter || f.toLowerCase().includes(filter)));
                 if (!match.length) grid.appendChild(el("div",
                     { color: COL.text, fontSize: "12px" },
                     files.length ? "no matches"
