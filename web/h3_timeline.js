@@ -2025,26 +2025,28 @@ function attachTimeline(node) {
         });
     }
 
-    async function fetchPickerFiles(tab) {
-        try {
-            if (tab === "output") {
-                // newest first, names pre-annotated with " [output]"
-                return await fetchInternalFiles("output");
-            }
-            const resp = await api.fetchApi("/object_info/LoadImage");
-            const j = await resp.json();
-            return j?.LoadImage?.input?.required?.image?.[0] || [];
-        } catch (e) { return []; /* upload still works */ }
-    }
-
+    // ---- image picker: real folder explorer over /h3guide/browse ----------
     const FAV_KEY = "h3guide.favPath";
     function readFav() {
         try { return JSON.parse(localStorage.getItem(FAV_KEY)) || null; }
         catch (e) { return null; }
     }
+    async function fetchBrowse(tab, folder, q) {
+        const ps = new URLSearchParams({ type: tab, path: folder || "", q: q || "", kind: "images" });
+        const r = await api.fetchApi("/h3guide/browse?" + ps.toString());
+        const j = await r.json();
+        if (j.error) throw new Error(j.error);
+        const ann = tab === "output" ? " [output]" : "";
+        return { dirs: j.dirs || [], files: (j.files || []).map((f) => f + ann) };
+    }
+
     async function openPicker(onPick) {
         const fav = readFav();
-        let files = await fetchPickerFiles(fav?.tab === "output" ? "output" : "input");
+        let tab = fav?.tab === "output" ? "output" : "input";
+        let folder = (fav && fav.tab === tab && fav.folder) || "";
+        let listing = { dirs: [], files: [] };
+        let webMode = false, webQ = "", webPage = 1, webAcc = [];
+        let searchTimer = null, loadGen = 0;
         openModal((root) => {
             const panel = el("div", {
                 width: "min(980px, 92vw)", maxHeight: "84vh", background: COL.bg,
@@ -2055,17 +2057,14 @@ function attachTimeline(node) {
                 display: "flex", gap: "8px", alignItems: "center",
                 padding: "8px 10px", borderBottom: `1px solid ${COL.divider}`,
             });
-            let tab = fav?.tab === "output" ? "output" : "input";
-            let folder = fav?.tab === tab ? (fav?.folder || "") : "";
             const tabBtn = (name, label) => {
                 const b = el("button", { ...btnStyle }, label);
-                b.addEventListener("click", async () => {
+                b.addEventListener("click", () => {
+                    if (webMode) return;
                     tab = name;
                     folder = "";
-                    files = await fetchPickerFiles(tab);
-                    styleTabs();
-                    rebuildFolders();
-                    fill(search.value.trim().toLowerCase());
+                    styleTabs(); styleFav();
+                    load();
                 });
                 return b;
             };
@@ -2077,8 +2076,34 @@ function attachTimeline(node) {
                 tabOut.style.borderColor = tab === "output" ? COL.bright : COL.border;
                 tabOut.style.color = tab === "output" ? COL.bright : COL.text;
             };
+            const crumb = el("span", {
+                color: COL.text, fontSize: "12px", fontFamily: "monospace",
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                maxWidth: "220px",
+            });
+            const favBtn = el("button", { ...btnStyle, padding: "3px 8px" }, "☆");
+            const styleFav = () => {
+                const f = readFav();
+                const here = f && f.tab === tab && (f.folder || "") === (folder || "");
+                favBtn.textContent = here ? "⭐" : "☆";
+                favBtn.style.color = here ? COL.mid : COL.text;
+                favBtn.title = here
+                    ? "this is your favourite location — the picker opens here. Click to clear."
+                    : "make this tab+folder the favourite location the picker opens at";
+                crumb.textContent = "/" + (folder || "");
+                crumb.title = (tab === "output" ? "output/" : "input/") + (folder || "");
+            };
+            favBtn.addEventListener("click", () => {
+                const f = readFav();
+                const here = f && f.tab === tab && (f.folder || "") === (folder || "");
+                try {
+                    if (here) localStorage.removeItem(FAV_KEY);
+                    else localStorage.setItem(FAV_KEY, JSON.stringify({ tab, folder }));
+                } catch (e) { /* storage unavailable */ }
+                styleFav();
+            });
             const search = el("input");
-            search.placeholder = "filter…";
+            search.placeholder = "search this folder + below…";
             Object.assign(search.style, {
                 flex: "1", background: COL.input, color: COL.bright,
                 border: `1px solid ${COL.border}`, borderRadius: "3px",
@@ -2091,77 +2116,28 @@ function attachTimeline(node) {
                     runWebSearch(false);
                 }
             });
-            // folder dropdown (input tab lists subfolders; output is flat)
-            const folderSel = el("select", {
-                background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
-                borderRadius: "3px", fontSize: "12px", padding: "3px 6px",
-                cursor: "pointer", maxWidth: "180px",
+            search.addEventListener("input", () => {
+                if (webMode) return;
+                clearTimeout(searchTimer);
+                searchTimer = setTimeout(load, 250);
             });
-            const rebuildFolders = () => {
-                folderSel.textContent = "";
-                const dirs = new Set();
-                for (const f of files) {
-                    const clean = f.replace(/\s*\[\w+\]\s*$/, "");
-                    const slash = clean.lastIndexOf("/");
-                    if (slash > -1) dirs.add(clean.slice(0, slash));
-                }
-                const all = el("option", null, "all folders");
-                all.value = "";
-                folderSel.appendChild(all);
-                for (const d of [...dirs].sort()) {
-                    const o = el("option", null, "📁 " + d);
-                    o.value = d;
-                    folderSel.appendChild(o);
-                }
-                if (folder && ![...dirs].includes(folder)) folder = "";
-                folderSel.value = folder;
-                folderSel.style.display = dirs.size ? "" : "none";
-                styleFav();
-            };
-            folderSel.addEventListener("change", () => {
-                folder = folderSel.value;
-                styleFav();
-                fill(search.value.trim().toLowerCase());
-            });
-            // ⭐ favourite: remembers tab + folder, applied on every open
-            const favBtn = el("button", { ...btnStyle, padding: "3px 8px" }, "☆");
-            const styleFav = () => {
-                const f = readFav();
-                const here = f && f.tab === tab && (f.folder || "") === (folder || "");
-                favBtn.textContent = here ? "⭐" : "☆";
-                favBtn.style.color = here ? COL.mid : COL.text;
-                favBtn.title = here
-                    ? "this is your favourite location — the picker opens here. Click to clear."
-                    : "make this tab+folder the favourite location the picker opens at";
-            };
-            favBtn.addEventListener("click", () => {
-                const f = readFav();
-                const here = f && f.tab === tab && (f.folder || "") === (folder || "");
-                try {
-                    if (here) localStorage.removeItem(FAV_KEY);
-                    else localStorage.setItem(FAV_KEY, JSON.stringify({ tab, folder }));
-                } catch (e) { /* storage unavailable */ }
-                styleFav();
-            });
-            let webMode = false, webQ = "", webPage = 1, webAcc = [];
             const webBtn = el("button", btnStyle, "🌐 web…");
             webBtn.title = "search free Creative Commons images (Openverse, all licenses — each result shows its own) and pull them straight into the input folder";
             webBtn.addEventListener("click", () => {
                 webMode = !webMode;
                 webBtn.style.color = webMode ? COL.mid : COL.bright;
                 webBtn.style.borderColor = webMode ? COL.mid : COL.border;
-                folderSel.style.display = webMode ? "none" : "";
                 favBtn.style.display = webMode ? "none" : "";
-                search.placeholder = webMode ? "search the free web… (Enter)" : "filter…";
+                crumb.style.display = webMode ? "none" : "";
+                search.placeholder = webMode ? "search the free web… (Enter)" : "search this folder + below…";
+                search.value = "";
                 if (webMode) {
                     grid.textContent = "";
                     grid.appendChild(el("div", { color: COL.text, fontSize: "12px" },
                         "type a search and press Enter — results are Creative Commons / public domain (license shown per result); picks download into input/web/"));
-                    search.value = "";
                     search.focus();
                 } else {
-                    rebuildFolders();
-                    fill(search.value.trim().toLowerCase());
+                    load();
                 }
             });
             const webCell = (res) => {
@@ -2180,8 +2156,7 @@ function attachTimeline(node) {
                     el("div", { color: "#666", fontSize: "9px", overflow: "hidden",
                         textOverflow: "ellipsis", whiteSpace: "nowrap" },
                         res.license + (res.creator ? " · " + res.creator : "")));
-                cell.title = `${res.title}
-${res.width}×${res.height} · ${res.license}`
+                cell.title = `${res.title}\n${res.width}×${res.height} · ${res.license}`
                     + (res.creator ? ` by ${res.creator}` : "");
                 cell.addEventListener("click", async () => {
                     cell.style.opacity = "0.4";
@@ -2232,111 +2207,104 @@ ${res.width}×${res.height} · ${res.license}`
             fileInput.addEventListener("change", async () => {
                 const f = fileInput.files?.[0];
                 if (!f) return;
-                const fd = new FormData();
-                fd.append("image", f);
                 try {
-                    const resp = await api.fetchApi("/upload/image", { method: "POST", body: fd });
-                    const j = await resp.json();
+                    const name = await uploadBlob(f, f.name);
                     closeModal();
-                    onPick(j.subfolder ? `${j.subfolder}/${j.name}` : j.name);
-                } catch (e) { console.error("[H3Guide] upload failed:", e); }
+                    onPick(name);
+                } catch (e) { toast("upload failed: " + e.message, true); }
             });
             const closeB = el("button", btnStyle, "✕");
             closeB.addEventListener("click", closeModal);
-            head.append(tabIn, tabOut, folderSel, favBtn, webBtn, search, up, fileInput, closeB);
-            styleTabs();
-            rebuildFolders();
+            head.append(tabIn, tabOut, crumb, favBtn, webBtn, search, up, fileInput, closeB);
 
-            const caption = el("div", {
-                padding: "6px 10px 0", color: COL.text, fontSize: "11px",
-            });
+            const caption = el("div", { padding: "6px 10px 0", color: COL.text, fontSize: "11px" });
             const grid = el("div", {
                 display: "flex", flexWrap: "wrap", gap: "6px", padding: "10px",
                 overflowY: "auto",
             });
-            const fill = (filter) => {
-                caption.textContent = tab === "output"
-                    ? "newest first — chain a clip by picking the last frame of your previous render"
-                    : "";
-                caption.style.display = tab === "output" ? "" : "none";
-                grid.textContent = "";
-                const cleanOf = (f) => f.replace(/\s*\[\w+\]\s*$/, "");
-                const dirOf = (f) => {
-                    const c = cleanOf(f);
-                    const s2 = c.lastIndexOf("/");
-                    return s2 > -1 ? c.slice(0, s2) : "";
-                };
-                const under = (f) => !folder ? true
-                    : (dirOf(f) === folder || dirOf(f).startsWith(folder + "/"));
-                let tiles = 0;
-                if (!filter && !webMode) {
-                    // explorer view: navigable folder tiles above this folder's files
-                    const goTo = (target) => {
-                        folder = target;
-                        folderSel.value = [...folderSel.options].some((o) => o.value === folder)
-                            ? folder : "";
-                        styleFav();
-                        fill("");
-                    };
-                    const tile = (label, target) => {
-                        const c = el("div", {
-                            width: "110px", height: "74px", display: "flex",
-                            flexDirection: "column", alignItems: "center",
-                            justifyContent: "center", gap: "2px",
-                            border: `2px dashed ${COL.slider}`, borderRadius: "4px",
-                            color: COL.bright, fontSize: "11px", cursor: "pointer",
-                            overflow: "hidden", padding: "2px",
-                        });
-                        c.append(el("span", { fontSize: "20px" }, "📁"),
-                            el("span", { maxWidth: "100px", overflow: "hidden",
-                                textOverflow: "ellipsis", whiteSpace: "nowrap" }, label));
-                        c.title = target || "(root)";
-                        c.addEventListener("click", () => goTo(target));
-                        tiles++;
-                        return c;
-                    };
-                    if (folder)
-                        grid.appendChild(tile("⬑ up",
-                            folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : ""));
-                    const kids = new Set();
-                    for (const f of files) {
-                        const d = dirOf(f);
-                        if (!under(f) || d === folder) continue;
-                        const rest = folder ? d.slice(folder.length + 1) : d;
-                        if (rest) kids.add(rest.split("/")[0]);
-                    }
-                    for (const k of [...kids].sort())
-                        grid.appendChild(tile(k, folder ? folder + "/" + k : k));
-                }
-                const match = files.filter((f) => under(f)
-                    && (filter ? f.toLowerCase().includes(filter) : dirOf(f) === folder));
-                if (!match.length && !tiles) grid.appendChild(el("div",
-                    { color: COL.text, fontSize: "12px" },
-                    files.length ? "no matches"
-                        : tab === "output" ? "output folder is empty — render something first"
-                        : "input folder is empty — use upload…"));
-                for (const f of match.slice(0, 400)) {
-                    const cell = el("div", { cursor: "pointer", textAlign: "center", width: "110px" });
-                    const im = el("img");
-                    im.loading = "lazy";
-                    im.src = inputFileUrl(f);
-                    Object.assign(im.style, {
-                        width: "110px", height: "74px", objectFit: "cover",
-                        borderRadius: "4px", border: `1px solid ${COL.border}`, display: "block",
-                    });
-                    const shown = f.replace(/\s*\[\w+\]\s*$/, "");
-                    const cap = el("div", { color: COL.text, fontSize: "10px", overflow: "hidden" },
-                        shown.length > 18 ? shown.slice(0, 16) + "…" : shown);
-                    cell.append(im, cap);
-                    cell.title = f;
-                    cell.addEventListener("click", () => { closeModal(); onPick(f); });
-                    grid.appendChild(cell);
-                }
-            };
-            search.addEventListener("input", () => { if (!webMode) fill(search.value.trim().toLowerCase()); });
-            fill("");
             panel.append(head, caption, grid);
             root.appendChild(panel);
+
+            const goTo = (target) => { folder = target; styleFav(); load(); };
+            const folderTile = (label, target) => {
+                const c = el("div", {
+                    width: "110px", height: "74px", display: "flex",
+                    flexDirection: "column", alignItems: "center",
+                    justifyContent: "center", gap: "2px",
+                    border: `2px dashed ${COL.slider}`, borderRadius: "4px",
+                    color: COL.bright, fontSize: "11px", cursor: "pointer",
+                    overflow: "hidden", padding: "2px",
+                });
+                c.append(el("span", { fontSize: "20px" }, "📁"),
+                    el("span", { maxWidth: "100px", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" }, label));
+                c.title = target || "(root)";
+                c.addEventListener("click", () => goTo(target));
+                return c;
+            };
+            const fileCell = (f) => {
+                const cell = el("div", { cursor: "pointer", textAlign: "center", width: "110px" });
+                const im = el("img");
+                im.loading = "lazy";
+                im.src = previewFileUrl(f);
+                im.addEventListener("error", () => { im.src = inputFileUrl(f); }, { once: true });
+                Object.assign(im.style, {
+                    width: "110px", height: "74px", objectFit: "cover",
+                    borderRadius: "4px", border: `1px solid ${COL.border}`, display: "block",
+                });
+                const shown = f.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                cell.append(im, el("div", { color: COL.text, fontSize: "10px", overflow: "hidden" },
+                    shown.length > 18 ? shown.slice(0, 16) + "…" : shown));
+                cell.title = f;
+                cell.addEventListener("click", () => { closeModal(); onPick(f); });
+                return cell;
+            };
+            const fill = () => {
+                const q = search.value.trim();
+                caption.textContent = tab === "output" && !folder && !q
+                    ? "newest first — chain a clip by picking the last frame of your previous render"
+                    : q ? `search results under /${folder || ""}` : "";
+                caption.style.display = caption.textContent ? "" : "none";
+                grid.textContent = "";
+                let tiles = 0;
+                if (!q) {
+                    if (folder) {
+                        grid.appendChild(folderTile("⬑ up",
+                            folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : ""));
+                        tiles++;
+                    }
+                    for (const d of listing.dirs) {
+                        grid.appendChild(folderTile(d.split("/").pop(), d));
+                        tiles++;
+                    }
+                }
+                for (const f of listing.files) grid.appendChild(fileCell(f));
+                if (!listing.files.length && !tiles)
+                    grid.appendChild(el("div", { color: COL.text, fontSize: "12px" },
+                        q ? "no matches"
+                            : tab === "output" ? "this folder is empty — render something first"
+                            : "this folder is empty — use upload…"));
+            };
+            const load = async () => {
+                const gen = ++loadGen;
+                grid.textContent = "";
+                grid.appendChild(el("div", { color: COL.text, fontSize: "12px" }, "loading…"));
+                try {
+                    const got = await fetchBrowse(tab, folder, search.value.trim());
+                    if (gen !== loadGen || webMode) return;
+                    listing = got;
+                    fill();
+                } catch (e) {
+                    if (gen !== loadGen) return;
+                    if (folder) { folder = ""; styleFav(); load(); return; }   // stale fav etc.
+                    grid.textContent = "";
+                    grid.appendChild(el("div", { color: COL.red, fontSize: "12px" },
+                        "listing failed: " + e.message));
+                }
+            };
+            styleTabs();
+            styleFav();
+            load();
         });
     }
 

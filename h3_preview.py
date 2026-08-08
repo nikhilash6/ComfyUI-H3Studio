@@ -25,6 +25,65 @@ def register():
 
     routes = PromptServer.instance.routes
 
+    IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+    VID_EXT = (".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi")
+    AUD_EXT = (".wav", ".mp3", ".ogg", ".oga", ".flac", ".m4a", ".opus")
+    KINDS = {"images": IMG_EXT, "video": VID_EXT, "audio": AUD_EXT}
+
+    @routes.get("/h3guide/browse")
+    async def h3guide_browse(request):
+        """Real directory listing for the picker: folders even when EMPTY (the
+        file-derived approach showed nothing in a fresh tree) and folder
+        navigation on the output tab (core's /internal listing is flat).
+        q= recursively searches filenames under the current path (bounded)."""
+        rq = request.rel_url.query
+        type_dir = folder_paths.get_directory_by_type(rq.get("type", "input"))
+        if type_dir is None:
+            return web.json_response({"error": "bad type"}, status=400)
+        rel = rq.get("path", "").replace("\\", "/").strip("/")
+        if ".." in rel.split("/"):
+            return web.json_response({"error": "bad path"}, status=400)
+        root = os.path.abspath(type_dir)
+        cur = os.path.abspath(os.path.join(root, rel)) if rel else root
+        if os.path.commonpath([root, cur]) != root:
+            return web.json_response({"error": "bad path"}, status=403)
+        if not os.path.isdir(cur):
+            return web.json_response({"error": "no such folder"}, status=404)
+        exts = KINDS.get(rq.get("kind", "images"), IMG_EXT)
+        q = rq.get("q", "").strip().lower()
+        dirs, files = [], []
+        if q:
+            # bounded recursive filename search under the current path
+            budget = 1500
+            for base, dnames, fnames in os.walk(cur):
+                depth = os.path.relpath(base, cur).count(os.sep)
+                if depth >= 6:
+                    dnames[:] = []
+                for fn in fnames:
+                    if budget <= 0:
+                        break
+                    if fn.lower().endswith(exts) and q in fn.lower():
+                        rp = os.path.relpath(os.path.join(base, fn), root)
+                        files.append((os.path.getmtime(os.path.join(base, fn)),
+                                      rp.replace("\\", "/")))
+                        budget -= 1
+                if budget <= 0:
+                    break
+        else:
+            try:
+                with os.scandir(cur) as it:
+                    for e in it:
+                        rp = os.path.relpath(e.path, root).replace("\\", "/")
+                        if e.is_dir():
+                            dirs.append(rp)
+                        elif e.name.lower().endswith(exts):
+                            files.append((e.stat().st_mtime, rp))
+            except OSError as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+        files.sort(key=lambda t: -t[0])          # newest first
+        return web.json_response({"dirs": sorted(dirs),
+                                  "files": [f for _, f in files[:800]]})
+
     @routes.get("/h3guide/preview")
     async def h3guide_preview(request):
         q = request.rel_url.query
