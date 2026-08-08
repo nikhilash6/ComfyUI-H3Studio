@@ -43,6 +43,9 @@ Pick footage in the editor's **🎞 v2v bar** (or feed the `v2v_images`/`v2v_aud
 ### I want to restyle only part of a clip and keep the rest untouched
 Use **H3 Frame Range → H3 Video To Latent → KSampler → H3 Splice** — recipe diagram in the [README](README.md#section-restyle--bake-it-back-in). Pin the section's first/last frames from the untouched footage so the joins can't drift.
 
+### I want a LoRA to only affect part of the clip
+**MiniMax H3 Temporal LoRA Blend** node, before the sampler: `model_base` from the checkpoint loader, `model_a` = base → your LoRA loader(s) (used *before* `boundary_seconds`), `model_b` for after (empty = the LoRA just drops out). Feather softens the handover; `audio_from` decides whether the soundtrack follows the ramp. Costs ~2× sampling time. Never put the turbo LoRA on one side only.
+
 ### I want to save my whole setup
 **💾 save setup** → JSON with everything (prompt, frames, refs, framings, strengths). **📂 load setup** restores it on any fresh node — it tells you if a socket-fed input can't travel.
 
