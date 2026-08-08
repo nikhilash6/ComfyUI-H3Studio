@@ -3181,6 +3181,92 @@ function attachTimeline(node) {
         // drawn dimmed UNDER the lanes so the timeline shows the footage it is
         // restyling. NLE-style center crops; opacity dial lives in the v2v bar
         // and persists in node.properties (a UI preference, not a widget).
+        // exact-frame preview while scrubbing/dragging over v2v footage.
+        // Sized like a filmstrip card (176x99, 2x backing store), floats above
+        // the track's right edge (over the beats-mode corner), pointer-through.
+        let scrubFrac = null;
+        const framePrev = el("div", {
+            position: "fixed", zIndex: "10015", display: "none",
+            background: COL.panel, border: `1px solid ${COL.border}`,
+            borderRadius: "6px", overflow: "hidden", pointerEvents: "none",
+            boxShadow: "0 6px 24px rgba(0,0,0,0.55)",
+        });
+        const framePrevCnv = el("canvas", { display: "block", width: "176px", height: "99px", background: "#000" });
+        framePrevCnv.width = 352; framePrevCnv.height = 198;
+        const framePrevCap = el("div", {
+            color: COL.bright, fontSize: "11px", fontFamily: "monospace",
+            textAlign: "center", padding: "2px 4px",
+        });
+        framePrev.append(framePrevCnv, framePrevCap);
+        const scrub = { vid: null, key: "", ready: false, pending: null, seeking: false };
+        function scrubSource() {
+            const vf = String(widgetValue(node, "v2v_video_file", "")).trim();
+            return (vf && !inputConnected(node, "v2v_images")) ? vf : null;
+        }
+        function ensureScrubVid(vf) {
+            if (scrub.key === vf && scrub.vid) return scrub.vid;
+            if (scrub.vid) { scrub.vid.removeAttribute("src"); scrub.vid.load(); }
+            const vv = document.createElement("video");
+            scrub.vid = vv; scrub.key = vf;
+            scrub.ready = false; scrub.pending = null; scrub.seeking = false;
+            vv.muted = true;
+            vv.preload = "auto";
+            vv.src = inputFileUrl(vf);
+            vv.addEventListener("loadedmetadata", () => {
+                scrub.ready = true;
+                if (scrub.pending != null) { const t = scrub.pending; scrub.pending = null; seekScrub(t); }
+            });
+            vv.addEventListener("seeked", () => {
+                scrub.seeking = false;
+                drawScrubFrame();
+                if (scrub.pending != null) { const t = scrub.pending; scrub.pending = null; seekScrub(t); }
+            });
+            vv.addEventListener("error", () => { framePrevCap.textContent = "can't decode footage"; });
+            return vv;
+        }
+        function seekScrub(t) {
+            const vv = scrub.vid;
+            if (!vv) return;
+            if (!scrub.ready || scrub.seeking) { scrub.pending = t; return; }   // coalesce
+            if (Math.abs(vv.currentTime - t) < 1 / (2 * FPS)) { drawScrubFrame(); return; }
+            scrub.seeking = true;
+            vv.currentTime = t;
+        }
+        function drawScrubFrame() {
+            const vv = scrub.vid;
+            if (!vv || !vv.videoWidth) return;
+            const c = framePrevCnv;
+            const sc = Math.max(c.width / vv.videoWidth, c.height / vv.videoHeight);
+            const cw = c.width / sc, ch2 = c.height / sc;
+            c.getContext("2d").drawImage(vv,
+                (vv.videoWidth - cw) / 2, (vv.videoHeight - ch2) / 2, cw, ch2,
+                0, 0, c.width, c.height);
+        }
+        function showFramePreview(frac) {
+            const vf = scrubSource();
+            if (!vf) return;
+            const vv = ensureScrubVid(vf);
+            const gs = Number(widgetValue(node, "v2v_start_seconds", 0)) || 0;
+            const ge0 = Number(widgetValue(node, "v2v_end_seconds", 0)) || 0;
+            const D = scrub.ready && isFinite(vv.duration) ? vv.duration : 0;
+            const ge = ge0 > 0 ? ge0 : D;
+            const srcT = gs + frac * Math.max(0, (ge || gs) - gs);
+            seekScrub(D ? Math.min(srcT, D - 0.001) : srcT);
+            framePrevCap.textContent =
+                `${timeOf(frac).toFixed(2)}s · f${frameOf(frac)} · src ${srcT.toFixed(2)}s`;
+            if (!framePrev.parentNode) (state.fs?.root || document.body).appendChild(framePrev);
+            const r = track.getBoundingClientRect();
+            framePrev.style.left = Math.min(window.innerWidth - 186, Math.max(8, r.right - 184)) + "px";
+            let by = r.top - 132;   // above the track header (beats-mode corner)
+            if (by < 8) by = r.top + 8;
+            framePrev.style.top = by + "px";
+            framePrev.style.display = "";
+        }
+        function hideFramePreview() {
+            framePrev.style.display = "none";
+            scrubFrac = null;
+        }
+
         const ghost = { key: "", thumbs: [] };
         const GHOST_N = 14;
         const ghostOpacity = () =>
@@ -3357,6 +3443,13 @@ function attachTimeline(node) {
             });
 
             // drag readout chip
+            if (scrubFrac != null) {
+                const x = fracToX(T, scrubFrac);
+                ctx.strokeStyle = COL.bright;
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(x, T.ruler - 4); ctx.lineTo(x, T.by + 8); ctx.stroke();
+                ctx.lineWidth = 1;
+            }
             if (state.dragReadout) {
                 const { x, text } = state.dragReadout;
                 ctx.font = "12px monospace";
@@ -3388,6 +3481,15 @@ function attachTimeline(node) {
             const p = evPos(ev);
             const h = hitAt(p);
             const T = track._h3T;
+            if (!h && p.y <= T.ruler + 6 && scrubSource()) {
+                // drag along the ruler = playhead scrub over the v2v footage
+                track.setPointerCapture(ev.pointerId);
+                state.drag = { kind: "scrub", T };
+                scrubFrac = xToFrac(T, p.x);
+                showFramePreview(scrubFrac);
+                renderTrack();
+                return;
+            }
             if (!h) { state.sel = null; fill(); return; }
             track.setPointerCapture(ev.pointerId);
             if (h.kind === "marker") {
@@ -3421,6 +3523,12 @@ function attachTimeline(node) {
             const p = evPos(ev);
             const T = d.T;
             const F = fc();
+            if (d.kind === "scrub") {
+                scrubFrac = xToFrac(T, p.x);
+                showFramePreview(scrubFrac);
+                renderTrack();
+                return;   // nothing written — no refresh needed
+            }
             if (d.kind === "midtime") {
                 const m = state.mids[d.i];
                 const lo = 1 / (F - 1), hi = (F - 2) / (F - 1);
@@ -3429,6 +3537,7 @@ function attachTimeline(node) {
                 m.frac = roundHalfEven(m.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, m.frac),
                     text: `${timeOf(m.frac).toFixed(2)}s · f${frameOf(m.frac)} · ${m.strength.toFixed(2)}` };
+                if (scrubSource()) showFramePreview(m.frac);   // the frame it will anchor over
                 pushMids();
             } else if (d.kind === "beattime") {
                 const b = state.beats[d.i];
@@ -3436,6 +3545,7 @@ function attachTimeline(node) {
                 b.frac = roundHalfEven(b.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, b.frac),
                     text: `${timeOf(b.frac).toFixed(2)}s · f${frameOf(b.frac)}` };
+                if (scrubSource()) showFramePreview(b.frac);
                 pushBeats();
             } else if (d.kind === "strength") {
                 const v = Math.min(2, Math.max(0,
@@ -3451,10 +3561,13 @@ function attachTimeline(node) {
 
         const endDrag = (ev) => {
             if (!state.drag) return;
+            const wasScrub = state.drag.kind === "scrub";
             state.drag = null;
             state.dragReadout = null;
+            hideFramePreview();
             try { track.releasePointerCapture(ev.pointerId); } catch (e) { /* released */ }
-            refresh(true);   // re-pull: the spec's nudged/quantized values win
+            if (wasScrub) renderTrack();
+            else refresh(true);   // re-pull: the spec's nudged/quantized values win
         };
         track.addEventListener("pointerup", endDrag);
         track.addEventListener("pointercancel", endDrag);
