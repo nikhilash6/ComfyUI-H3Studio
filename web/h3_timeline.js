@@ -3985,6 +3985,126 @@ function attachTimeline(node) {
             });
         }
 
+        // reel preview: play the chain as it stands — trims respected, joins as
+        // hard cuts (crossfades/fades are export-only). Two videos double-buffer
+        // so the next clip is loaded and seeked before its cut arrives.
+        function openReelPlayer() {
+            const list = reelGet();
+            if (!list.length) return;
+            const n = list.length;
+            let idx = 0, act = 0, raf = 0, stopped = false;
+            const mkV = () => {
+                const v = document.createElement("video");
+                v.preload = "auto";
+                v.volume = 0.7;
+                Object.assign(v.style, { width: "100%", display: "none", background: "#000" });
+                return v;
+            };
+            const vids = [mkV(), mkV()];
+            const entry = (i) => list[i % n];
+            const prep = (v, i) => {
+                const e = entry(i);
+                v.src = inputFileUrl(e.name);
+                v.load();
+                v.addEventListener("loadedmetadata",
+                    () => { v.currentTime = e.in || 0; }, { once: true });
+            };
+            openModal((root) => {
+                const panel = el("div", {
+                    background: COL.bg, border: `1px solid ${COL.border}`, borderRadius: "8px",
+                    display: "flex", flexDirection: "column", overflow: "hidden",
+                    fontFamily: "sans-serif", maxWidth: "92vw",
+                });
+                const head = el("div", {
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
+                });
+                const label = el("span", { color: COL.bright, fontSize: "13px", flex: "1" }, "");
+                const doneB = el("button", { ...btnStyle, color: COL.green }, "done");
+                doneB.addEventListener("click", closeModal);
+                head.append(label, doneB);
+                const wrap = el("div", { background: "#000", cursor: "pointer" });
+                for (const v of vids) {
+                    Object.assign(v.style, { maxWidth: "min(880px, 88vw)", maxHeight: "62vh" });
+                    wrap.appendChild(v);
+                }
+                const note = el("div", { color: COL.text, fontSize: "11px", padding: "6px 12px 10px" },
+                    "trims applied · joins play as hard cuts — crossfades, fades and luma-match are applied at export · click the picture to pause · loops");
+                panel.append(head, wrap, note);
+                root.appendChild(panel);
+
+                const paintLabel = () => {
+                    const e = entry(idx);
+                    const nm = e.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                    label.textContent = `▶ reel preview — clip ${(idx % n) + 1}/${n}: ${nm}`
+                        + ((e.in || 0) > 0 || e.out > 0
+                            ? ` (${(e.in || 0).toFixed(1)}–${e.out > 0 ? e.out.toFixed(1) + "s" : "end"})` : "");
+                };
+                const tick = () => {
+                    if (stopped) return;
+                    const v = vids[act], e = entry(idx);
+                    const d = isFinite(v.duration) ? v.duration : 0;
+                    const out = e.out > 0 ? Math.min(e.out, d || e.out) : d;
+                    if (d && out && v.currentTime >= out - 0.03) { advance(); return; }
+                    raf = requestAnimationFrame(tick);
+                };
+                const advance = () => {
+                    const old = vids[act];
+                    old.pause();
+                    old.style.display = "none";
+                    act = 1 - act;
+                    idx += 1;
+                    const e = entry(idx), v = vids[act];
+                    v.style.display = "block";
+                    const go = () => {
+                        if (stopped) return;
+                        v.play().catch(() => {});
+                        paintLabel();
+                        raf = requestAnimationFrame(tick);
+                    };
+                    if (v.readyState >= 1) {
+                        if (Math.abs(v.currentTime - (e.in || 0)) > 0.2) v.currentTime = e.in || 0;
+                        go();
+                    } else {
+                        v.addEventListener("loadedmetadata",
+                            () => { v.currentTime = e.in || 0; go(); }, { once: true });
+                    }
+                    prep(old, idx + 1);   // double-buffer the following clip
+                };
+                for (const v of vids)
+                    v.addEventListener("error", () => {
+                        if (stopped || v !== vids[act]) return;
+                        toast("couldn't play " + entry(idx).name + " — skipping", true);
+                        advance();
+                    });
+                wrap.addEventListener("click", () => {
+                    const v = vids[act];
+                    if (v.paused) { v.play().catch(() => {}); raf = requestAnimationFrame(tick); }
+                    else v.pause();
+                });
+                // start: first clip visible + playing, second preloading
+                prep(vids[0], 0);
+                if (n > 1) prep(vids[1], 1);
+                vids[0].style.display = "block";
+                const e0 = entry(0);
+                vids[0].addEventListener("canplay", function once() {
+                    vids[0].removeEventListener("canplay", once);
+                    if (stopped) return;
+                    if (Math.abs(vids[0].currentTime - (e0.in || 0)) > 0.2)
+                        vids[0].currentTime = e0.in || 0;
+                    vids[0].play().catch(() => {});
+                    raf = requestAnimationFrame(tick);
+                });
+                paintLabel();
+            }, () => {
+                stopped = true;
+                cancelAnimationFrame(raf);
+                for (const v of vids) {
+                    try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {}
+                }
+            });
+        }
+
         const stripHead = el("div", {
             ...sectionHeadStyle(), display: "flex", justifyContent: "space-between",
             gap: "16px", alignItems: "center",
@@ -4350,7 +4470,11 @@ function attachTimeline(node) {
         };
         const fadeInF = fxField("fade in", "fadeIn");
         const fadeOutF = fxField("fade out", "fadeOut");
-        reelCtl.append(el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
+        const playReelB = el("button", { ...btnStyle, color: COL.green }, "▶ play reel");
+        playReelB.title = "preview the chain as it stands, without exporting — trims respected, joins as hard cuts (crossfades, fades and luma-match only apply at export)";
+        playReelB.addEventListener("click", () => openReelPlayer());
+        reelCtl.append(playReelB,
+            el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
             reelAddB, rerollB, exportB);
         reelHead.appendChild(reelCtl);
