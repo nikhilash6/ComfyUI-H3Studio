@@ -43,6 +43,46 @@ import comfy.utils
 from comfy_api.latest import io
 
 
+def prepare_zone_mask(m3, t_lat, h, w, mask_feather):
+    """[B,H,W] mask (single or per-frame batch) -> [Tm, h, w] on a latent-side
+    grid, Tm = 1 (static) or t_lat (per-frame, pooled onto H3's (1,4,4,4,4)
+    time grid). Feather grows-then-blurs with the original re-maximized in, so
+    a hard matte's interior keeps full strength and the falloff extends
+    strictly outward. Shared by the Soft Denoise Zone and Regional Prompt."""
+    m3 = m3.to(torch.float32).clamp(0.0, 1.0)
+    if m3.shape[0] > 1 and t_lat > 1:
+        from .minimax_h3_guide import mc_pixel_frames, mc_step_offsets
+        pixel_frames = mc_pixel_frames(t_lat)
+        offsets = mc_step_offsets(t_lat)
+        b0 = m3.shape[0]
+        if b0 != pixel_frames:
+            logging.info("MiniMaxH3Guide: %d mask frames onto a %d-frame clip — "
+                         "resampling by index.", b0, pixel_frames)
+        idx = [min(b0 - 1, round(p * (b0 - 1) / max(1, pixel_frames - 1)))
+               for p in range(pixel_frames)]
+        per_step = []
+        for k in range(t_lat):
+            n_k = mc_pixel_frames(k + 1) - offsets[k]
+            grp = m3[[idx[p] for p in
+                      range(offsets[k], min(offsets[k] + n_k, pixel_frames))]]
+            per_step.append(grp.mean(dim=0))
+        v = torch.stack(per_step)               # [T, H, W]
+    else:
+        v = m3[0:1]                             # [1, H, W] — whole clip
+    v = torch.nn.functional.interpolate(
+        v.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False)[:, 0]
+    r = int(round(float(mask_feather) * min(h, w)))
+    if r > 0:
+        k2 = 2 * r + 1
+        v4 = v.unsqueeze(1)
+        v4 = torch.nn.functional.max_pool2d(v4, kernel_size=k2, stride=1, padding=r)
+        for _ in range(3):   # triple box blur ~ gaussian
+            v4 = torch.nn.functional.avg_pool2d(
+                v4, kernel_size=k2, stride=1, padding=r, count_include_pad=False)
+        v = torch.maximum(v4[:, 0], v)
+    return v.clamp(0.0, 1.0)
+
+
 def radial_map(h, w, cx, cy, radius, feather):
     """Feathered disc on the latent grid, circular in FRAME space.
 
@@ -119,51 +159,9 @@ class H3SoftDenoiseZone(io.ComfyNode):
 
         if mask is not None:
             m3 = mask if mask.ndim == 3 else mask[None]
-            m3 = m3.to(torch.float32).clamp(0.0, 1.0)
-            t_lat = int(video.shape[2])
-            if m3.shape[0] > 1 and t_lat > 1:
-                # PER-FRAME mask (e.g. SAM2 video segmentation): pool each
-                # latent step's group of pixel frames — H3's latent time axis
-                # covers (1,4,4,4,4) pixel frames per step, the same grid the
-                # motion-context maths uses. Averaging the group also gives
-                # motion a naturally soft temporal edge.
-                from .minimax_h3_guide import mc_pixel_frames, mc_step_offsets
-                pixel_frames = mc_pixel_frames(t_lat)
-                offsets = mc_step_offsets(t_lat)
-                b0 = m3.shape[0]
-                if b0 != pixel_frames:
-                    logging.info("H3SoftDenoiseZone: %d mask frames onto a %d-frame "
-                                 "clip — resampling by index.", b0, pixel_frames)
-                idx = [min(b0 - 1, round(p * (b0 - 1) / max(1, pixel_frames - 1)))
-                       for p in range(pixel_frames)]
-                per_step = []
-                for k in range(t_lat):
-                    n_k = mc_pixel_frames(k + 1) - offsets[k]
-                    grp = m3[[idx[p] for p in
-                              range(offsets[k], min(offsets[k] + n_k, pixel_frames))]]
-                    per_step.append(grp.mean(dim=0))
-                v = torch.stack(per_step)               # [T, H, W]
-            else:
-                v = m3[0:1]                             # [1, H, W] — whole clip
-            v = torch.nn.functional.interpolate(
-                v.unsqueeze(1), size=(h, w), mode="bilinear",
-                align_corners=False)[:, 0]
-            # feather: grow then blur, so a hard segmentation matte fades
-            # OUTWARD past the subject instead of leaving a matte line. The
-            # original mask is re-maximized in at the end: the subject's
-            # interior keeps FULL strength, only the falloff is added.
-            r = int(round(float(mask_feather) * min(h, w)))
-            if r > 0:
-                k2 = 2 * r + 1
-                v4 = v.unsqueeze(1)
-                v4 = torch.nn.functional.max_pool2d(v4, kernel_size=k2,
-                                                    stride=1, padding=r)
-                for _ in range(3):   # triple box blur ~ gaussian
-                    v4 = torch.nn.functional.avg_pool2d(
-                        v4, kernel_size=k2, stride=1, padding=r,
-                        count_include_pad=False)
-                v = torch.maximum(v4[:, 0], v)
-            v = v.clamp(0.0, 1.0)
+            # per-frame batches (SAM2 etc.) follow the subject through time;
+            # single masks apply to the whole clip — see prepare_zone_mask
+            v = prepare_zone_mask(m3, int(video.shape[2]), h, w, float(mask_feather))
         else:
             v = radial_map(h, w, float(center_x), float(center_y),
                            float(radius), float(feather)).unsqueeze(0)

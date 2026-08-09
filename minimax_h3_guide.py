@@ -1293,6 +1293,10 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         else:
             tokens = clip.tokenize(prompt, images=images)
         cond = clip.encode_from_tokens_scheduled(tokens)
+        # the FINAL prompt (frame notes + beats appended) rides along so
+        # downstream nodes can locate token spans (H3RegionalPrompt); core
+        # ignores unknown cond keys
+        cond = node_helpers.conditioning_set_values(cond, {"minimax_prompt_text": prompt})
         if ref_blocks:
             cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": ref_blocks})
             if keyframes and not extra_conds_patch.install():
@@ -1330,9 +1334,10 @@ class MiniMaxH3GuideExtension(ComfyExtension):
         from .h3_temporal_lora import H3TemporalLoraBlend
         from .h3_v2v import H3BasicScheduler
         from .h3_diff_v2v import H3SoftDenoiseZone
+        from .h3_regional import H3RegionalPrompt
         return [MiniMaxH3ImageToVideoGuide, LoadImageZoomPan,
                 H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend,
-                H3BasicScheduler, H3SoftDenoiseZone]
+                H3BasicScheduler, H3SoftDenoiseZone, H3RegionalPrompt]
 
 
 async def comfy_entrypoint() -> MiniMaxH3GuideExtension:

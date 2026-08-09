@@ -622,6 +622,36 @@ mask path — 18 checks); the perceptual result on a video model with global
 attention is exactly the thing only a render can prove. If the feather band
 shows content disagreement, widen the feather.
 
+### Regional prompting (H3 Regional Prompt)
+
+The zone node controls where change is *allowed*; **H3 Regional Prompt**
+supplies what belongs there. A fragment that appears verbatim in your prompt
+("a woman in a red coat") is located in the tokenised text, and the DiT's
+attention is biased so the masked region's video rows attend harder to those
+tokens (`strength`, additive on the attention logits) while the rest of the
+frame attends less to them (`containment`) — the description is pulled into
+the zone and kept out of everywhere else. Same mask input as the zone node
+(single or per-frame SAM2 batch, same feather); share the wire and you have
+the full region-swap stack: *only this region may change, and this is what
+belongs in it*. It also works with no v2v at all — spatial subject placement
+in plain generation.
+
+This is possible on H3 because the model runs one global attention over a
+single packed sequence (text, conditions, audio and video rows side by side),
+so "these pixels should listen to those words" is an additive bias on
+specific attention entries. No core edits: it rides comfy's own
+`optimized_attention_override` hook plus a forward wrapper that reads the
+packed layout each run; the negative/uncond pass is detected by text length
+and left untouched.
+
+**EXPERIMENTAL** — to our knowledge the first regional prompting on H3, and
+attention bias is a dial the model never trained with: expect a usable range
+(~1.0–2.5) and a too-high range that degrades composition. Costs a dense
+S×S bias (~200 MB) and usually moves attention off the flash kernel while
+armed. One regional node per graph for now. Verified headlessly against real
+packed layouts (bias lands exactly on zone-rows × fragment-tokens, uncond
+untouched, 16 checks).
+
 ### v2v from the Guide node itself
 
 You don't need the standalone nodes for the common case — the Guide node takes
