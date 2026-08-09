@@ -3426,9 +3426,13 @@ function attachTimeline(node) {
         const v2vLabel = el("span", { color: COL.text, fontSize: "12px", flex: "1",
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
         const v2vPick = el("button", btnStyle, "pick footage…");
-        v2vPick.title = "restyle existing footage: the node's latent becomes this video encoded for partial denoise (sampler denoise 0.3-0.7). Output tab = restyle a previous render.";
+        v2vPick.title = "restyle existing footage: the node's latent becomes this video encoded for partial denoise (sampler denoise 0.3-0.7). Output tab = restyle a previous render. You can also DRAG a video file from Explorer straight onto this bar.";
         v2vPick.addEventListener("click", () => openVideoPicker((n) => {
+            // fresh footage: the old section and framing belonged to the old clip
             setWidget("v2v_video_file", n);
+            setWidget("v2v_start_seconds", 0);
+            setWidget("v2v_end_seconds", 0);
+            setWidget("v2v_crop", "");
             refresh(true);
         }));
         const v2vStart = dimField(46), v2vEnd = dimField(46);
@@ -5406,6 +5410,15 @@ function attachTimeline(node) {
         makeDropTarget(refsRow, "image/", addFileRef, COL.green);
         makeDropTarget(vidRow, "video/", addFileVideo, COL.green);
         makeDropTarget(audioRow, "audio/", addFileAudio, COL.green);
+        makeDropTarget(v2vBar, "video/", (n) => {
+            // fresh footage: the old section and framing belonged to the old clip
+            setWidget("v2v_video_file", n);
+            setWidget("v2v_start_seconds", 0);
+            setWidget("v2v_end_seconds", 0);
+            setWidget("v2v_crop", "");
+            refresh(true);
+            toast("v2v source set — " + n.replace(/\s*\[\w+\]\s*$/, ""));
+        }, COL.green);
 
         function sectionHeadStyle() {
             return {
