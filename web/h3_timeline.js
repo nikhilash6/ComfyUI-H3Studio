@@ -2411,12 +2411,48 @@ function attachTimeline(node) {
             fill();
         };
         for (const f of [wField, hField, lenField]) f.addEventListener("blur", commitDims);
+        // aspect presets: dims computed at the trained-area budget (768*1344)
+        // for the chosen ratio, both axes snapped to the 32 grid
+        const ASPECTS = [["16:9", 16 / 9], ["9:16", 9 / 16], ["1:1", 1],
+            ["4:3", 4 / 3], ["3:4", 3 / 4], ["21:9", 21 / 9], ["2.39:1", 2.39]];
+        const aspectSel = el("select", {
+            background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
+            borderRadius: "3px", fontSize: "12px", padding: "2px 4px", cursor: "pointer",
+        });
+        aspectSel.title = "aspect preset — sets width×height for this ratio at the model's trained area budget (fields stay editable for exact values)";
+        {
+            const o = el("option", null, "aspect…");
+            o.value = "";
+            aspectSel.appendChild(o);
+            for (const [label] of ASPECTS) {
+                const o2 = el("option", null, label);
+                o2.value = label;
+                aspectSel.appendChild(o2);
+            }
+        }
+        aspectSel.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        aspectSel.addEventListener("change", () => {
+            const found = ASPECTS.find((a) => a[0] === aspectSel.value);
+            if (!found) return;
+            const r = found[1];
+            const area = 768 * 1344;
+            const w = snap32(Math.sqrt(area * r));
+            const h = snap32(Math.sqrt(area / r));
+            setWidget("width", w);
+            setWidget("height", h);
+            refresh(true);
+        });
+        const syncAspectSel = () => {
+            const [w, h] = outWH();
+            const hit = ASPECTS.find(([, r]) => Math.abs((w / h) / r - 1) < 0.02);
+            aspectSel.value = hit ? hit[0] : "";
+        };
         const stats = el("span", {
             color: COL.text, fontSize: "12px", fontFamily: "monospace", flex: "1",
             display: "flex", alignItems: "center", gap: "5px",
         });
-        stats.append(wField, el("span", null, "×"), hField, lockBtn, el("span", null, "px ·"),
-            lenField, snapNote);
+        stats.append(wField, el("span", null, "×"), hField, lockBtn, aspectSel,
+            el("span", null, "px ·"), lenField, snapNote);
 
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
@@ -4341,6 +4377,7 @@ function attachTimeline(node) {
             if (document.activeElement !== hField) hField.value = String(oH);
             if (document.activeElement !== lenField)
                 lenField.value = (Number(widgetValue(node, "length", 124)) / FPS).toFixed(1) + "s";
+            if (document.activeElement !== aspectSel) syncAspectSel();
             snapNote.textContent = `= ${F}f @ ${FPS}fps`;
             {
                 const vf = String(widgetValue(node, "v2v_video_file", "")).trim();
