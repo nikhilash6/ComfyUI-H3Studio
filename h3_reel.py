@@ -1,16 +1,23 @@
-"""Reel export: concatenate a chain of clips into one video, server-side.
+"""Reel export: stitch a chain of clips into one video, server-side.
 
-POST /h3guide/reel_export   {"names": ["a.mp4 [output]", ...], "fps": 24}
-  -> {"name": "h3reel/reel-<stamp>.mp4 [output]"}
+POST /h3guide/reel_export
+  {"clips": [{"name": "a.mp4 [output]", "in": 0.0, "out": 0.0, "xfade": 0.5},
+             ...],
+   "fade_in": 0.5, "fade_out": 1.0, "fps": 24}
+  -> {"name": "h3reel/reel-<stamp>.mp4 [output]", "frames": N}
 
-Decode via the pack's load_input_video (PyAV underneath — the same machinery
-core's video nodes use, no external ffmpeg binary), conform every clip to the
-first clip's canvas (aspect-preserving cover), stitch audio sample-accurately
-with 15 ms de-click ramps at every join, and encode mp4/h264 through core's
-VideoFromComponents. Registered at import when a PromptServer exists.
+Non-destructive edits, applied here only: per-clip in/out trims (seconds,
+out<=0 = clip end), a crossfade from each clip INTO the next (video linear
+blend, audio equal-power), and whole-reel fade in/out (to black + silence).
+Hard joints (xfade 0) get 15 ms audio de-click ramps. Decoding and encoding
+go through PyAV (core's own video machinery — no external ffmpeg).
+
+Legacy {"names": [...]} bodies still work. Registered at import when a
+PromptServer exists.
 """
 
 import logging
+import math
 import os
 import time
 from fractions import Fraction
@@ -21,8 +28,9 @@ MAX_TOTAL_FRAMES = 4320   # ~3 minutes at 24fps — keeps the concat in RAM sane
 SUBDIR = "h3reel"
 
 
-def _fit_audio(audio, n_frames, fps, sr, channels):
-    """One clip's soundtrack -> exactly n_frames/fps seconds at sr/channels."""
+def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
+    """One clip's soundtrack -> exactly n_frames/fps seconds starting at
+    start_frames/fps, resampled/channel-matched, padded with silence."""
     want = int(round(n_frames / fps * sr))
     if audio is None or audio.get("waveform") is None or audio["waveform"].shape[-1] == 0:
         return torch.zeros(1, channels, want)
@@ -36,26 +44,30 @@ def _fit_audio(audio, n_frames, fps, sr, channels):
             import torchaudio
             wf = torchaudio.functional.resample(wf, src_sr, sr)
         except Exception:
-            # linear fallback — good enough for matching clip rates
             want_len = int(round(wf.shape[-1] * sr / src_sr))
             wf = torch.nn.functional.interpolate(wf, size=want_len, mode="linear",
                                                  align_corners=False)
     c = wf.shape[1]
     if c < channels:
-        wf = wf.repeat(1, channels // max(c, 1), 1)[:, :channels]
+        wf = wf.repeat(1, math.ceil(channels / max(c, 1)), 1)[:, :channels]
     elif c > channels:
         wf = wf[:, :channels]
-    if wf.shape[-1] >= want:
-        wf = wf[..., :want]
-    else:
+    s0 = int(round(start_frames / fps * sr))
+    wf = wf[..., s0:s0 + want]
+    if wf.shape[-1] < want:
         pad = torch.zeros(wf.shape[0], wf.shape[1], want - wf.shape[-1])
         wf = torch.cat([wf, pad], dim=-1)
-    # 15ms de-click ramps at both ends of every clip
-    ramp_n = min(int(sr * 0.015), max(1, want // 4))
-    if ramp_n > 1:
-        ramp = torch.linspace(0.0, 1.0, ramp_n)
-        wf[..., :ramp_n] *= ramp
-        wf[..., -ramp_n:] *= ramp.flip(0)
+    return wf
+
+
+def _declick(wf, sr, head=False, tail=False):
+    n = min(int(sr * 0.015), max(1, wf.shape[-1] // 4))
+    if n > 1:
+        ramp = torch.linspace(0.0, 1.0, n)
+        if head:
+            wf[..., :n] *= ramp
+        if tail:
+            wf[..., -n:] *= ramp.flip(0)
     return wf
 
 
@@ -79,50 +91,109 @@ def register():
             body = await request.json()
         except Exception:
             return web.json_response({"error": "bad json"}, status=400)
-        names = body.get("names") or []
+        clips = body.get("clips")
+        if clips is None:   # legacy shape
+            clips = [{"name": n} for n in (body.get("names") or [])]
         fps = float(body.get("fps") or 24.0)
-        if not isinstance(names, list) or not (1 <= len(names) <= 64):
-            return web.json_response({"error": "names must be a list of 1-64 clips"},
+        fade_in = max(0.0, float(body.get("fade_in") or 0.0))
+        fade_out = max(0.0, float(body.get("fade_out") or 0.0))
+        if not isinstance(clips, list) or not (1 <= len(clips) <= 64):
+            return web.json_response({"error": "clips must be a list of 1-64 entries"},
                                      status=400)
-        frames_all, audio_all = [], []
+
+        pieces = []          # [{frames, audio, xfade_next_frames}]
         base_w = base_h = None
         sr, channels = 44100, 2
         total = 0
         try:
-            for i, name in enumerate(names):
-                frames, audio = load_input_video(str(name), "reel clip %d" % (i + 1),
+            for i, c in enumerate(clips):
+                name = str(c.get("name", ""))
+                frames, audio = load_input_video(name, "reel clip %d" % (i + 1),
                                                  max_seconds=None)
-                total += frames.shape[0]
+                n = frames.shape[0]
+                t_in = max(0.0, float(c.get("in") or 0.0))
+                t_out = float(c.get("out") or 0.0)
+                i0 = min(n - 1, int(round(t_in * fps)))
+                i1 = n if t_out <= 0 else max(i0 + 1, min(n, int(round(t_out * fps))))
+                if i1 - i0 < 1:
+                    return web.json_response(
+                        {"error": "clip %d trims to nothing" % (i + 1)}, status=400)
+                total += i1 - i0
                 if total > MAX_TOTAL_FRAMES:
                     return web.json_response(
                         {"error": "reel exceeds ~%d s — export in parts"
                          % int(MAX_TOTAL_FRAMES / fps)}, status=413)
+                fsel = frames[i0:i1]
                 if base_w is None:
-                    base_h, base_w = frames.shape[1], frames.shape[2]
+                    base_h, base_w = fsel.shape[1], fsel.shape[2]
                     if audio is not None and audio.get("waveform") is not None:
                         sr = int(audio.get("sample_rate", sr))
                         channels = max(1, audio["waveform"].shape[-2]
                                        if audio["waveform"].ndim >= 2 else 1)
-                elif (frames.shape[1], frames.shape[2]) != (base_h, base_w):
-                    # conform to the first clip's canvas, aspect-preserving cover
-                    frames = _resize(frames, base_w, base_h, "center")
-                frames_all.append(frames)
-                audio_all.append(_fit_audio(audio, frames.shape[0], fps, sr, channels))
+                elif (fsel.shape[1], fsel.shape[2]) != (base_h, base_w):
+                    fsel = _resize(fsel, base_w, base_h, "center")
+                pieces.append({
+                    "frames": fsel,
+                    "audio": _clip_audio(audio, i0, i1 - i0, fps, sr, channels),
+                    "xfade": max(0.0, float(c.get("xfade") or 0.0)),
+                })
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             logging.exception("MiniMaxH3Guide: reel export failed")
             return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
                                      status=500)
-        images = torch.cat(frames_all, dim=0)
-        waveform = torch.cat(audio_all, dim=-1).clamp(-1.0, 1.0)
+
+        # assemble with crossfades (each piece's xfade bleeds INTO the next)
+        out_f, out_a = None, None
+        for i, p in enumerate(pieces):
+            f, a = p["frames"], p["audio"]
+            if out_f is None:
+                out_f, out_a = f, a
+                continue
+            prev_x = pieces[i - 1]["xfade"]
+            xn = int(round(prev_x * fps))
+            xn = min(xn, out_f.shape[0] - 1, f.shape[0] - 1)
+            if xn > 0:
+                tv = torch.linspace(0.0, 1.0, xn).view(-1, 1, 1, 1)
+                blend = out_f[-xn:] * (1.0 - tv) + f[:xn] * tv
+                out_f = torch.cat([out_f[:-xn], blend, f[xn:]], dim=0)
+                xs = min(int(round(xn / fps * sr)), out_a.shape[-1] - 1, a.shape[-1] - 1)
+                ta = torch.linspace(0.0, 1.0, xs)
+                # equal-power keeps perceived loudness level through the blend
+                a_bl = (out_a[..., -xs:] * torch.cos(ta * math.pi / 2)
+                        + a[..., :xs] * torch.sin(ta * math.pi / 2))
+                out_a = torch.cat([out_a[..., :-xs], a_bl, a[..., xs:]], dim=-1)
+            else:
+                _declick(out_a, sr, tail=True)
+                _declick(a, sr, head=True)
+                out_f = torch.cat([out_f, f], dim=0)
+                out_a = torch.cat([out_a, a], dim=-1)
+
+        # whole-reel fades: video to black, audio to silence
+        if fade_in > 0:
+            fn = min(int(round(fade_in * fps)), out_f.shape[0])
+            if fn > 1:
+                r = torch.linspace(0.0, 1.0, fn).view(-1, 1, 1, 1)
+                out_f[:fn] = out_f[:fn] * r
+                s = min(int(round(fade_in * sr)), out_a.shape[-1])
+                out_a[..., :s] *= torch.linspace(0.0, 1.0, s)
+        if fade_out > 0:
+            fn = min(int(round(fade_out * fps)), out_f.shape[0])
+            if fn > 1:
+                r = torch.linspace(1.0, 0.0, fn).view(-1, 1, 1, 1)
+                out_f[-fn:] = out_f[-fn:] * r
+                s = min(int(round(fade_out * sr)), out_a.shape[-1])
+                out_a[..., -s:] *= torch.linspace(1.0, 0.0, s)
+
+        out_a = out_a.clamp(-1.0, 1.0)
         out_dir = os.path.join(folder_paths.get_output_directory(), SUBDIR)
         os.makedirs(out_dir, exist_ok=True)
         fname = "reel-%s.mp4" % time.strftime("%Y%m%d-%H%M%S")
         path = os.path.join(out_dir, fname)
         try:
             video = InputImpl.VideoFromComponents(Types.VideoComponents(
-                images=images, audio={"waveform": waveform, "sample_rate": sr},
+                images=out_f, audio={"waveform": out_a, "sample_rate": sr},
                 frame_rate=Fraction(int(round(fps)))))
             video.save_to(path, format=Types.VideoContainer.MP4,
                           codec=Types.VideoCodec.H264)
@@ -130,9 +201,9 @@ def register():
             logging.exception("MiniMaxH3Guide: reel encode failed")
             return web.json_response({"error": "encode failed: %s" % exc}, status=500)
         logging.info("MiniMaxH3Guide: reel exported — %d clip(s), %d frames -> %s",
-                     len(names), images.shape[0], path)
+                     len(clips), out_f.shape[0], path)
         return web.json_response({"name": SUBDIR + "/" + fname + " [output]",
-                                  "frames": int(images.shape[0])})
+                                  "frames": int(out_f.shape[0])})
 
 
 register()
