@@ -1846,10 +1846,36 @@ function attachTimeline(node) {
                         + (cast.audio.length ? " · ♪×" + cast.audio.length : "")));
                 row.appendChild(nameLine);
                 const thumbs = el("div", { display: "flex", flexWrap: "wrap", gap: "6px" });
+                // the modal is built once and cachedImg loads async (its onload
+                // only repaints the main editor) — so each thumb repaints itself
+                // until its image lands, else a cold cache leaves placeholders
+                const castThumb = (im) => {
+                    const holder = el("div");
+                    const paint = () => {
+                        holder.textContent = "";
+                        const img = cachedImg(im.file);
+                        if (img) {
+                            holder.appendChild(thumbEl(img, 100, 100, "", im.crop, null));
+                            return true;
+                        }
+                        if (cachedImgFailed(im.file)) {
+                            holder.appendChild(thumbEl(null, 100, 100, "missing", null, null));
+                            return true;
+                        }
+                        holder.appendChild(thumbEl(null, 100, 100, "loading…", null, null));
+                        return false;
+                    };
+                    const tick = (left) => {
+                        if (paint() || left <= 0 || state.modal?.root !== myRoot) return;
+                        setTimeout(() => tick(left - 1), 300);
+                    };
+                    tick(60);   // keeps trying ~18s — big stills decode slowly
+                    return holder;
+                };
                 for (const im of cast.images.slice(0, 4)) {
                     const cell = el("div", { display: "flex", flexDirection: "column",
                         alignItems: "center", gap: "2px" });
-                    cell.append(thumbEl(cachedImg(im.file), 100, 100, "", im.crop, null),
+                    cell.append(castThumb(im),
                         el("span", { color: "#666", fontSize: "10px", fontFamily: "monospace" },
                             im.strength.toFixed(2) + (im.crop ? " · ⛶" : "")));
                     thumbs.appendChild(cell);
