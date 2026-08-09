@@ -432,7 +432,20 @@ const HELP_COPY = [
 
 // ============================================================================
 
+const RES_KEY = "h3guide.lastRes";
+
 function attachTimeline(node) {
+    // last-used canvas res survives across sessions: a fresh node starts on it.
+    // Safe to apply unconditionally here — a workflow being LOADED applies its
+    // own saved widget values after node creation, overwriting this.
+    try {
+        const lr = JSON.parse(localStorage.getItem(RES_KEY));
+        if (lr && Number(lr.w) >= 32 && Number(lr.h) >= 32) {
+            const ww = getWidget(node, "width"), hw = getWidget(node, "height");
+            if (ww) ww.value = Math.round(Number(lr.w) / 32) * 32;
+            if (hw) hw.value = Math.round(Number(lr.h) / 32) * 32;
+        }
+    } catch (e) { /* defaults stand */ }
     const state = {
         mids: [], beats: [], refs: [], midsAuto: true, refsAuto: true,
         videoRefs: [], videoRefsAuto: true, videoMeta: new Map(),
@@ -2535,6 +2548,12 @@ function attachTimeline(node) {
         });
         const wMax = () => getWidget(node, "width")?.options?.max ?? 16384;
         const r32 = (v) => Math.min(wMax(), Math.max(32, Math.round(v / 32) * 32));
+        const saveRes = () => {
+            // remember the last-used res across sessions (fresh nodes start on it)
+            try { localStorage.setItem(RES_KEY, JSON.stringify({
+                w: Number(widgetValue(node, "width", 1344)),
+                h: Number(widgetValue(node, "height", 768)) })); } catch (e) { /* private mode */ }
+        };
         const commitDims = () => {
             const curW = Number(widgetValue(node, "width", 1344));
             const curH = Number(widgetValue(node, "height", 768));
@@ -2548,6 +2567,7 @@ function attachTimeline(node) {
             }
             setWidget("width", w);
             setWidget("height", h);
+            saveRes();
             // length reads in SECONDS ("5.2" or "5.2s"); frames still accepted as "124f"
             const raw = lenField.value.trim().toLowerCase();
             const cur = Number(widgetValue(node, "length", 124));
@@ -2592,6 +2612,7 @@ function attachTimeline(node) {
             const h = snap32(Math.sqrt(area / r));
             setWidget("width", w);
             setWidget("height", h);
+            saveRes();
             refresh(true);
         });
         const syncAspectSel = () => {
@@ -2830,6 +2851,7 @@ function attachTimeline(node) {
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
+                saveRes();   // a res you actually rendered at is the one worth remembering
                 await app.queuePrompt(0);
                 qWrap.style.display = "inline-flex";
                 qFill.style.width = "0%";
