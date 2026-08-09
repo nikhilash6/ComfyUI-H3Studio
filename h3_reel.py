@@ -16,6 +16,7 @@ Legacy {"names": [...]} bodies still work. Registered at import when a
 PromptServer exists.
 """
 
+import asyncio
 import logging
 import math
 import os
@@ -114,7 +115,6 @@ def register():
 
     @routes.post("/h3guide/reel_export")
     async def h3guide_reel_export(request):
-        from .minimax_h3_guide import _resize, load_input_video
         try:
             body = await request.json()
         except Exception:
@@ -128,6 +128,19 @@ def register():
         if not isinstance(clips, list) or not (1 <= len(clips) <= 64):
             return web.json_response({"error": "clips must be a list of 1-64 entries"},
                                      status=400)
+        # the decode/assemble/encode is seconds of CPU — off the event loop, or
+        # every other request (previews, even queue POSTs) stalls behind it
+        try:
+            payload, status = await asyncio.to_thread(_do_export, clips, fps,
+                                                      fade_in, fade_out)
+        except Exception as exc:
+            logging.exception("MiniMaxH3Guide: reel export failed")
+            return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
+                                     status=500)
+        return web.json_response(payload, status=status)
+
+    def _do_export(clips, fps, fade_in, fade_out):
+        from .minimax_h3_guide import _resize, load_input_video
 
         pieces = []          # [{frames, audio, xfade_next_frames}]
         base_w = base_h = None
@@ -144,13 +157,11 @@ def register():
                 i0 = min(n - 1, int(round(t_in * fps)))
                 i1 = n if t_out <= 0 else max(i0 + 1, min(n, int(round(t_out * fps))))
                 if i1 - i0 < 1:
-                    return web.json_response(
-                        {"error": "clip %d trims to nothing" % (i + 1)}, status=400)
+                    return {"error": "clip %d trims to nothing" % (i + 1)}, 400
                 total += i1 - i0
                 if total > MAX_TOTAL_FRAMES:
-                    return web.json_response(
-                        {"error": "reel exceeds ~%d s — export in parts"
-                         % int(MAX_TOTAL_FRAMES / fps)}, status=413)
+                    return {"error": "reel exceeds ~%d s — export in parts"
+                            % int(MAX_TOTAL_FRAMES / fps)}, 413
                 fsel = frames[i0:i1]
                 if base_w is None:
                     base_h, base_w = fsel.shape[1], fsel.shape[2]
@@ -168,11 +179,7 @@ def register():
                     "lumafix": bool(c.get("mc")),
                 })
         except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=400)
-        except Exception as exc:
-            logging.exception("MiniMaxH3Guide: reel export failed")
-            return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
-                                     status=500)
+            return {"error": str(exc)}, 400
 
         # assemble with crossfades (each piece's xfade bleeds INTO the next)
         out_f, out_a = None, None
@@ -231,11 +238,11 @@ def register():
                           codec=Types.VideoCodec.H264)
         except Exception as exc:
             logging.exception("MiniMaxH3Guide: reel encode failed")
-            return web.json_response({"error": "encode failed: %s" % exc}, status=500)
+            return {"error": "encode failed: %s" % exc}, 500
         logging.info("MiniMaxH3Guide: reel exported — %d clip(s), %d frames -> %s",
                      len(clips), out_f.shape[0], path)
-        return web.json_response({"name": SUBDIR + "/" + fname + " [output]",
-                                  "frames": int(out_f.shape[0])})
+        return {"name": SUBDIR + "/" + fname + " [output]",
+                "frames": int(out_f.shape[0])}, 200
 
 
 register()
