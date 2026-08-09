@@ -2493,6 +2493,23 @@ function attachTimeline(node) {
         stats.append(wField, el("span", null, "×"), hField, lockBtn, aspectSel,
             el("span", null, "px ·"), lenField, snapNote);
 
+        const freeBtn = el("button", btnStyle, "🧹 free VRAM");
+        freeBtn.title = "unload models and free cached memory on the server — useful between heavy runs or before switching checkpoints. The next queue reloads what it needs (slower first run).";
+        freeBtn.addEventListener("click", async () => {
+            freeBtn.disabled = true;
+            try {
+                await api.fetchApi("/free", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ unload_models: true, free_memory: true }),
+                });
+                toast("VRAM freed — models unload; the next queue reloads them");
+            } catch (e) {
+                toast("free failed: " + (e?.message || e), true);
+            } finally {
+                freeBtn.disabled = false;
+            }
+        });
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
@@ -2760,7 +2777,7 @@ function attachTimeline(node) {
         const helpBtn = el("button", btnStyle, "?");
         const closeBtn = el("button", btnStyle, "✕");
         closeBtn.addEventListener("click", closeFullscreen);
-        header.append(title, stats, queueBtn, swapBtn, saveBtn, loadBtn, loadInput, helpBtn, closeBtn);
+        header.append(title, stats, queueBtn, freeBtn, swapBtn, saveBtn, loadBtn, loadInput, helpBtn, closeBtn);
 
         // body: main column + inspector
         const body = el("div", { display: "flex", flex: "1 1 auto", minHeight: "0" });
@@ -2831,10 +2848,17 @@ function attachTimeline(node) {
             n.title = tooltip;
             n.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") n.blur(); });
             n.addEventListener("blur", () => {
-                const v = parseFloat(n.value);
+                const v = parseFloat(n.value);   // "auto"/blank parse NaN -> 0
                 setWidget(widget, isFinite(v) && v >= 0 ? v : 0);
                 fill();
             });
+            // 0 wears its meaning: show "auto" (dimmed) instead of a bare zero
+            n._h3ShowMp = (v) => {
+                n.value = v > 0 ? String(v) : "auto";
+                n.style.color = v > 0 ? COL.bright : "#7a7a7a";
+                n.style.fontStyle = v > 0 ? "normal" : "italic";
+            };
+            n.addEventListener("focus", () => { if (n.value === "auto") n.select(); });
             return n;
         };
 
@@ -3432,13 +3456,13 @@ function attachTimeline(node) {
         castB.title = "save the current references as a named cast member, or add a saved one — persists across workflows";
         castB.addEventListener("click", openCastModal);
         refsCtl.appendChild(castB);
-        refsCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "sizing"));
+        refsCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "img auto-size"));
         const sizeSel = miniSelect("ref_image_size", ["match", "max"],
-            "'match' scales references to the generation's pixel area; 'max' keeps a 2048px short edge for best identity — several times slower, since reference rows ride every sampling step. Ignored when the MP cap is set.");
+            "What 'auto' means for reference images when no MP cap is typed: 'match' scales each ref to your output canvas area (recommended); 'max' keeps a 2048px short edge for maximum identity detail — several times slower, since reference rows ride every sampling step. Ignored entirely once an MP cap is set.");
         refsCtl.appendChild(sizeSel);
-        refsCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "MP cap"));
+        refsCtl.appendChild(el("span", { fontSize: "12px", color: COL.text }, "img refs MP"));
         const mpNum = miniNum("ref_megapixels",
-            "Cap each reference at this many megapixels (e.g. 0.4). Overrides sizing when above 0; scales down only. 0 = off.");
+            "Speed dial for reference IMAGES: they cost compute on EVERY sampling step in proportion to their pixel area. Type a cap in megapixels (e.g. 0.5) to shrink them before encoding — down-only, aspect preserved, 32px grid. 'auto' = no cap; the img auto-size rule on the left decides instead.");
         refsCtl.appendChild(mpNum);
         const maskChk = el("input");
         maskChk.type = "checkbox";
@@ -3530,11 +3554,11 @@ function attachTimeline(node) {
             background: COL.panel, border: `1px solid ${COL.border}`,
             borderRadius: "5px", padding: "4px 12px", alignSelf: "center",
         });
-        vidCtl.appendChild(el("span", { fontSize: "12px", color: COL.bright }, "⚡ MP cap"));
+        vidCtl.appendChild(el("span", { fontSize: "12px", color: COL.bright }, "⚡ video refs MP"));
         const vidMp = miniNum("ref_video_megapixels",
-            "Cap reference video frames at this many megapixels (e.g. 0.4). Aspect-preserving, down-only, 32-grid — never a squish. 0 = the model's 768-short-edge canvas rule. The single biggest speed dial in the pack.");
+            "THE speed dial: reference videos pay their row cost per FRAME, every sampling step. Type a cap in megapixels (0.4 is a good start) to shrink the frames before encoding — down-only, aspect preserved, 32px grid, never a squish. 'auto' = no cap; the model's own canvas rule applies (768px short edge, area-capped).");
         vidCtl.appendChild(vidMp);
-        vidCtl.appendChild(el("span", { fontSize: "11px", color: "#666" }, "0 = auto · the big speed dial"));
+        vidCtl.appendChild(el("span", { fontSize: "11px", color: "#666" }, "auto = 768px rule · the big speed dial"));
         vidHead.appendChild(vidCtl);
         const vidRow = el("div", {
             display: "flex", gap: "12px", padding: "8px 16px 16px", overflowX: "auto",
@@ -4950,7 +4974,7 @@ function attachTimeline(node) {
             // audio references: sockets only (no audio picker), so the editor's job
             // is visibility + the one strength dial + playback when resolvable
             if (document.activeElement !== vidMp)
-                vidMp.value = String(Number(widgetValue(node, "ref_video_megapixels", 0)) || 0);
+                vidMp._h3ShowMp(Number(widgetValue(node, "ref_video_megapixels", 0)) || 0);
             vidRow.textContent = "";
             numbered.videos.forEach(({ num, v, snd, aNum }, i) => {
                 const c = el("div", {
@@ -5205,7 +5229,7 @@ function attachTimeline(node) {
             if (document.activeElement !== sizeSel)
                 sizeSel.value = widgetValue(node, "ref_image_size", "match");
             if (document.activeElement !== mpNum)
-                mpNum.value = String(Number(widgetValue(node, "ref_megapixels", 0)) || 0);
+                mpNum._h3ShowMp(Number(widgetValue(node, "ref_megapixels", 0)) || 0);
             maskChk.checked = !!widgetValue(node, "mask_ref_pixels", false);
             const anyMask = connectedSlots(node, "ref_mask_").length > 0;
             maskWrap.style.display = anyMask ? "inline-flex" : "none";
