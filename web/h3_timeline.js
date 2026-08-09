@@ -2483,6 +2483,19 @@ function attachTimeline(node) {
         state.recorderStream = null;
     }
 
+    function stopVideosIn(elm, release) {
+        // Chrome keeps a detached (or merely hidden) <video> playing — its
+        // audio ghosts on until GC. Pause before hiding; release the source
+        // before rebuilding a container.
+        if (!elm) return;
+        for (const v of elm.querySelectorAll("video")) {
+            try {
+                v.pause();
+                if (release) { v.removeAttribute("src"); v.load(); }
+            } catch (e) { /* already gone */ }
+        }
+    }
+
     function closeFullscreen() {
         closeCtxMenu();
         stopRecorder();
@@ -2492,6 +2505,7 @@ function attachTimeline(node) {
         state.fs = null;
         window.removeEventListener("keydown", f.onKey, true);
         for (const [ev, fn] of f.apiEvents || []) api.removeEventListener(ev, fn);
+        stopVideosIn(f.root, true);
         f.root.remove();
         renderSummary();
     }
@@ -2735,7 +2749,10 @@ function attachTimeline(node) {
         });
         const resTitle = el("span", { color: COL.bright, fontSize: "12px", flex: "1" }, "");
         const resClose = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "✕");
-        resClose.addEventListener("click", () => { resPanel.style.display = "none"; });
+        resClose.addEventListener("click", () => {
+            stopVideosIn(resBody);   // hiding doesn't stop playback — audio ghosted on
+            resPanel.style.display = "none";
+        });
         resHead.append(resTitle, resClose);
         const resBody = el("div", { background: "#000", minHeight: "60px" });
         const resFoot = el("div", { display: "none", gap: "6px", padding: "6px 8px", flexWrap: "wrap" });
@@ -2750,6 +2767,7 @@ function attachTimeline(node) {
             run.previewURL = URL.createObjectURL(blob);
             let im = resBody.firstChild;
             if (!im || im.tagName !== "IMG") {
+                stopVideosIn(resBody, true);
                 resBody.textContent = "";
                 im = el("img", { width: "100%", display: "block" });
                 resBody.appendChild(im);
@@ -2760,6 +2778,7 @@ function attachTimeline(node) {
         };
         const showResult = (name, isVideo) => {
             const renderedSpan = run.mcSpan;   // captured at queue time
+            stopVideosIn(resBody, true);
             resBody.textContent = "";
             if (isVideo) {
                 const v = el("video", { width: "100%", display: "block" });
@@ -4343,6 +4362,7 @@ function attachTimeline(node) {
             const list = reelGet();
             reelHead.style.display = list.length ? "flex" : "none";
             reelRow.style.display = list.length ? "flex" : "none";
+            stopVideosIn(reelRow, true);   // a playing card would ghost on after rebuild
             reelRow.textContent = "";
             list.forEach((entry, i) => {
                 if (i > 0) {
