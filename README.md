@@ -605,6 +605,55 @@ with `H3 Video To Latent`, keeping every other Guide feature (keyframes, refs,
 beats, cast) in play. The fullscreen editor shows a **🎞 v2v bar** whenever a
 source is connected or named, with the file picker and the seconds range inline.
 
+## Motion context (⏭▶) — joins with real continuity
+
+Plain ⏭ chaining hands the next clip a still frame: pixel continuity, but the
+model re-decides instantaneous motion from a standing start, and reference
+audio is only ever *imitated* — a cover band, not the same recording. **⏭▶
+with motion** (on reel cards and the render dock) fixes both at once:
+
+- The previous clip's **tail frames** (default 22) are encoded in **one VAE
+  call** and pinned at the new clip's head **on its own timeline** — one
+  never-denoised condition block per latent step, at its exact frame offset.
+  The motion between those frames lives inside the pinned latents, so the new
+  clip picks up the same velocity and direction, not just the same pixels.
+- The **tail audio** rides the reference machinery for construction, then its
+  time coordinates are rewritten to end exactly at the join. That single
+  coordinate change is what turns "similar music" into **the same waveform,
+  continued** — the upstream pack this technique comes from measured join
+  correlation going from ~0.45 (incoherent timing) to 0.95+ with a stable
+  offset.
+
+Practicalities:
+
+- The render **opens by repeating the pinned tail** (~0.92 s at 22 frames).
+  **🎞 add to reel** sets the new card's in-trim automatically, so an export
+  never duplicates the join — non-destructive, adjust it on the card if you
+  want.
+- The **⏭▶ MOTION bar** in the editor holds the dials: frames (snapped down to
+  the VAE's 5/22/39 run grid), audio frames (end-aligned with the video
+  window; 0 = picture only, needs `audio_vae` otherwise), and the source cut
+  point (⏭▶ on a trimmed card passes its OUT time). The pinned span shows
+  hatched at the head of the timeline.
+- Under a context, `first_frame` is ignored (the context IS the opening),
+  waypoints must sit past the pinned span, and the context rows are ground
+  truth — full strength, untouched by the strength dials.
+- **Cost**: every pinned row rides through all sampling steps. 22 frames ≈ 7
+  extra cond blocks; 5 frames is the budget option. Spend ⏭▶ only on joins
+  where continuous motion crosses the cut, and use plain ⏭ elsewhere.
+- **Sound dulls down a chain.** Each clip's audio regenerates the previous
+  clip's *output*, so losses compound like photocopies — timing stays locked,
+  but after several motion-joins the top end goes first. Restart the chain at
+  a natural transition when you hear it.
+
+**Credit:** the technique — including the audio-timeline discovery and its
+seam-probe verification — is from the **ComfyUI-H3-Motion-Context** pack,
+absorbed here natively so it composes with this pack's layout patches, refs
+and reel. **Don't run both packs in one ComfyUI session**: both patch the same
+H3 layout machinery, and with this pack's class replacement active the other
+pack's constructor wrapper goes dead, silently anchoring its context frames at
+frame 0. Use one or the other.
+
 ## Timed text (experimental)
 
 Beats of description pinned to moments in the clip — **no image required**. One line
@@ -758,6 +807,13 @@ push-in that's anchored to a real photograph but free to animate within it.
   producing garbage, and stock first/last workflows bypass it entirely.
 - **Untested against `MiniMax H3 Reference to Video`.** This only touches the
   keyframe path. Reference conditioning is a separate mechanism.
+- **Motion context inherits its source pack's test breadth**: the mechanism was
+  verified upstream on one machine, one resolution, one sampler (plus our
+  headless maths cross-check against that pack's own formulas). Audio quality
+  degrades cumulatively down a motion-chained sequence; a small constant
+  ~10 ms audio offset per context clip was measured upstream and is unfixed.
+  And it conflicts with running ComfyUI-H3-Motion-Context itself in the same
+  session — pick one pack.
 - **Above `1.0` is unclamped and off-distribution.** It's there because
   sometimes you want it. It can also blow out the ending.
 - Inherits every stock H3 constraint: batch size 1, frame counts snap to the

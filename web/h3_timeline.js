@@ -330,6 +330,8 @@ const SETUP_FIELDS = [
     "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_megapixels",
     "ref_video_crops", "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds",
     "v2v_crop", "v2v_denoise",
+    "motion_context_file", "motion_context_end_seconds",
+    "motion_context_frames", "motion_context_audio_frames",
     "mask_ref_pixels",
 ];
 
@@ -345,6 +347,8 @@ const SETUP_DEFAULTS = {
     ref_audio_files: "", ref_video_spec: "", ref_video_files: "", ref_video_megapixels: 0.0,
     ref_video_crops: "", v2v_video_file: "", v2v_start_seconds: 0.0, v2v_end_seconds: 0.0,
     v2v_crop: "", v2v_denoise: 0.55,
+    motion_context_file: "", motion_context_end_seconds: 0.0,
+    motion_context_frames: 22, motion_context_audio_frames: 22,
     mask_ref_pixels: false,
 };
 
@@ -1448,11 +1452,47 @@ function attachTimeline(node) {
         reelSet(list);
     }
 
+    // motion context (⏭▶): the whole previous-clip tail pinned at the new
+    // clip's head, so motion AND the audio waveform continue through the join
+    function mcSnap(n) {
+        for (const g of [39, 22, 5, 1]) if (g <= n) return g;
+        return 1;
+    }
+    function mcSpanFrames() {
+        if (!String(widgetValue(node, "motion_context_file", "")).trim()) return 0;
+        return mcSnap(Math.max(1, Number(widgetValue(node, "motion_context_frames", 22)) || 22));
+    }
+    function continueWithMotion(videoName, atSeconds) {
+        reelAdd(videoName);   // a continuation docks its source in the chain
+        setWidget("motion_context_file", videoName);
+        setWidget("motion_context_end_seconds",
+            atSeconds && atSeconds > 0 ? Math.round(atSeconds * 100) / 100 : 0);
+        // the context IS the opening — python ignores first_frame anyway, but a
+        // stale thumbnail lying about the opening would mislead
+        if (!inputConnected(node, "first_frame")
+            && String(widgetValue(node, "first_frame_file", "")).trim()) {
+            setWidget("first_frame_file", "");
+            setWidget("first_frame_crop", "");
+        }
+        refresh(true);
+        const span = mcSpanFrames();
+        toast(`⏭▶ motion context set — ${span} tail frames + audio pinned, so motion and `
+            + `sound continue through the join. The pinned ${(span / FPS).toFixed(2)}s head `
+            + `is auto-trimmed when the render joins the reel.`);
+    }
+
     function finalFrameToFirst(videoName, atSeconds) {
         reelAdd(videoName);   // a continuation docks its source in the chain
         if (inputConnected(node, "first_frame")) {
             toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph, then press ⏭ again", true);
             return;
+        }
+        if (String(widgetValue(node, "motion_context_file", "")).trim()) {
+            // plain ⏭ means "last frame → first" — a leftover context would
+            // silently override the very frame this button just set
+            setWidget("motion_context_file", "");
+            setWidget("motion_context_end_seconds", 0);
+            toast("motion context cleared — plain ⏭ continues from the still frame only");
         }
         extractLastFrame(videoName, (fname) => {
             setWidget("first_frame_file", fname);
@@ -2519,7 +2559,7 @@ function attachTimeline(node) {
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
-        const run = { armed: false, pid: null, live: false, previewURL: null };
+        const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0 };
         const qWrap = el("span", { display: "none", alignItems: "center", gap: "6px" });
         const qBar = el("div", {
             width: "110px", height: "6px", background: "#2a2a2a",
@@ -2650,17 +2690,34 @@ function attachTimeline(node) {
                     "⏭ last frame → first");
                 chainB.title = "continue this clip: extract its final frame and set it as the next first frame";
                 chainB.addEventListener("click", () => finalFrameToFirst(name));
+                const motB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
+                    "⏭▶ with motion");
+                motB.title = "continue this clip WITH MOTION: its tail frames + audio are pinned at the next clip's head, so motion and the actual sound carry through the join (costs extra conditioning rows; the pinned head is auto-trimmed on the reel)";
+                motB.addEventListener("click", () => continueWithMotion(name));
                 const refB = el("button", { ...btnStyle, fontSize: "11px" }, "+ as video ref");
                 refB.title = "carry this clip's motion and sound into the next one as a reference video";
                 refB.addEventListener("click", () => addFileVideo(name));
                 const reelB = el("button", { ...btnStyle, fontSize: "11px" }, "🎞 add to reel");
                 reelB.title = "append this clip to the chain at the bottom";
+                const renderedSpan = run.mcSpan;   // captured at queue time
                 reelB.addEventListener("click", () => {
                     reelAdd(name);
+                    if (renderedSpan > 0) {
+                        // this render opens with the pinned context head — trim it
+                        // non-destructively so a later export never duplicates it
+                        const l = reelGet();
+                        const e2 = l[l.length - 1];
+                        if (e2?.name === name && !(e2.in > 0)) {
+                            e2.in = renderedSpan / FPS;
+                            reelSet(l);
+                            toast(`added — in-trim auto-set to ${(renderedSpan / FPS).toFixed(2)}s `
+                                + `to drop the repeated context head (adjust on the card if you like)`);
+                        }
+                    }
                     reelB.textContent = "✓ in reel";
                     reelB.disabled = true;
                 });
-                resFoot.append(chainB, refB, reelB);
+                resFoot.append(chainB, motB, refB, reelB);
             } else {
                 const useB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
                     "use as first frame");
@@ -2693,6 +2750,7 @@ function attachTimeline(node) {
             try {
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
+                run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
                 await app.queuePrompt(0);
                 qWrap.style.display = "inline-flex";
                 qFill.style.width = "0%";
@@ -2707,6 +2765,9 @@ function attachTimeline(node) {
         const onExecStart = ({ detail }) => {
             run.live = true;
             if (run.armed) { run.pid = detail?.prompt_id ?? null; run.armed = false; }
+            // queued outside our ▶ (ComfyUI's own button): estimate the context
+            // span from the live widgets instead of trusting a stale capture
+            else run.mcSpan = mcSpanFrames();
         };
         const onProgress = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
@@ -2963,6 +3024,55 @@ function attachTimeline(node) {
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
             v2vScrub, v2vFrame, ghostWrap, dnWrap, v2vPick, v2vClear, v2vDenoise);
+
+        // motion-context strip: continue a clip with real motion + the same
+        // audio (⏭▶ on reel cards / the render dock writes these widgets; this
+        // bar shows what's set and offers the dials)
+        const mcBar = el("div", {
+            display: "flex", gap: "8px", alignItems: "center", padding: "6px 16px",
+            flex: "0 0 auto", borderBottom: `1px solid ${COL.divider}`,
+        });
+        mcBar.appendChild(el("span", { color: COL.text, fontSize: "11px", letterSpacing: "0.06em" },
+            "⏭▶ MOTION"));
+        const mcLabel = el("span", { color: COL.text, fontSize: "12px", flex: "1",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+        const mcNote = el("span", { fontSize: "11px", display: "none", whiteSpace: "nowrap",
+            color: COL.text });
+        const mcFrames = dimField(40), mcAudio = dimField(40), mcEnd = dimField(46);
+        mcFrames.title = "tail frames to pin (video VAE runs: 5, 22 or 39 — anything else snaps DOWN). 22 is nearly seamless; 5 is cheap; 39 untested. Also a speed dial: pinned rows ride every sampling step.";
+        mcAudio.title = "tail AUDIO frames to pin, end-aligned with the video window (0 = picture only). 22 overlays the video window exactly — the tested config. Needs audio_vae.";
+        mcEnd.title = "continue from this moment of the context clip, in seconds (0 = its end). ⏭▶ on a trimmed reel card sets this to the card's OUT point.";
+        const commitMc = () => {
+            const f = parseFloat(mcFrames.value), a = parseFloat(mcAudio.value),
+                e2 = parseFloat(mcEnd.value);
+            setWidget("motion_context_frames",
+                isFinite(f) ? Math.min(39, Math.max(1, Math.round(f))) : 22);
+            setWidget("motion_context_audio_frames",
+                isFinite(a) && a >= 0 ? Math.min(240, Math.round(a)) : 22);
+            setWidget("motion_context_end_seconds", isFinite(e2) && e2 >= 0 ? e2 : 0);
+            fill();
+        };
+        for (const f of [mcFrames, mcAudio, mcEnd]) f.addEventListener("blur", commitMc);
+        const mcPick = el("button", btnStyle, "pick clip…");
+        mcPick.title = "continue WITH MOTION from an existing video (output tab = previous renders): its tail frames + audio are pinned at this clip's head";
+        mcPick.addEventListener("click", () => openVideoPicker((n) => {
+            setWidget("motion_context_file", n);
+            setWidget("motion_context_end_seconds", 0);   // new clip, old cut point is meaningless
+            refresh(true);
+        }));
+        const mcClear = el("button", { ...btnStyle, color: COL.red, padding: "1px 7px" }, "✕");
+        mcClear.title = "clear the motion context (joins go back to plain cuts / still-frame continuation)";
+        mcClear.addEventListener("click", () => {
+            setWidget("motion_context_file", "");
+            setWidget("motion_context_end_seconds", 0);
+            refresh(true);
+        });
+        mcBar.append(mcLabel, mcNote,
+            el("span", { color: COL.text, fontSize: "11px" }, "frames"), mcFrames,
+            el("span", { color: COL.text, fontSize: "11px" }, "audio"), mcAudio,
+            el("span", { color: COL.text, fontSize: "11px" }, "end"), mcEnd,
+            el("span", { color: COL.text, fontSize: "11px" }, "s"),
+            mcPick, mcClear);
 
         // ---- motion path: Ken Burns through the model -----------------------
         // Two windows (A=start, B=end) over one image; the chosen curve places
@@ -3724,6 +3834,7 @@ function attachTimeline(node) {
             reelSet(list);
             try {
                 run.armed = true;
+                run.mcSpan = mcSpanFrames();
                 await app.queuePrompt(0);
                 toast("re-rolling — the new render will join the reel");
             } catch (e) {
@@ -3952,6 +4063,9 @@ function attachTimeline(node) {
                     mk("⏭", "continue from this clip's OUT point (final kept frame → first frame)",
                         () => finalFrameToFirst(entry.name, entry.out > 0 ? entry.out : undefined),
                         COL.green),
+                    mk("⏭▶", "continue WITH MOTION from this clip's OUT point — its tail frames + audio are pinned at the next clip's head, so motion and sound carry through the join (costs extra rows; the pinned head is auto-trimmed)",
+                        () => continueWithMotion(entry.name, entry.out > 0 ? entry.out : undefined),
+                        COL.green),
                     mk("🎥", "add this clip as a reference video — its motion, look and sound condition the next render",
                         () => addFileVideo(entry.name), COL.green),
                     mk("✕", "remove from the chain (the file stays on disk)", () => {
@@ -3965,7 +4079,7 @@ function attachTimeline(node) {
             });
         }
 
-        main.append(promptHead, chipRow, promptTA, v2vBar, stripHead, strip, trackHead, track,
+        main.append(promptHead, chipRow, promptTA, v2vBar, mcBar, stripHead, strip, trackHead, track,
             refsHead, refsRow, vidHead, vidRow, audioHead, audioRow,
             reelHead, reelRow, helpStrip);
         body.append(main, inspector);
@@ -4657,6 +4771,32 @@ function attachTimeline(node) {
             }
 
             // keyframe lane
+            // motion-context head: hatch the pinned span so it's obvious those
+            // frames are already decided (they repeat the previous clip's tail)
+            const mcs = mcSpanFrames();
+            if (mcs > 0) {
+                const endX = fracToX(T, Math.min(1, mcs / Math.max(1, fc() - 1)));
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(T.x0, T.ky - 10, Math.max(0, endX - T.x0), 20);
+                ctx.clip();
+                ctx.globalAlpha = 0.4;
+                ctx.strokeStyle = COL.green;
+                ctx.beginPath();
+                for (let hx = T.x0 - 20; hx < endX; hx += 6) {
+                    ctx.moveTo(hx, T.ky + 10);
+                    ctx.lineTo(hx + 20, T.ky - 10);
+                }
+                ctx.stroke();
+                ctx.restore();
+                ctx.fillStyle = COL.green;
+                ctx.globalAlpha = 0.85;
+                ctx.font = "10px monospace";
+                ctx.textAlign = "left";
+                ctx.fillText("⏭▶ pinned", T.x0, T.ky + 20);
+                ctx.globalAlpha = 1;
+                ctx.textAlign = "center";
+            }
             ctx.strokeStyle = COL.axis;
             ctx.beginPath(); ctx.moveTo(T.x0, T.ky); ctx.lineTo(T.x1, T.ky); ctx.stroke();
             const stemH = (s) => (s / 2) * T.stem;
@@ -5054,6 +5194,30 @@ function attachTimeline(node) {
                         v2vNote.style.color = COL.text;
                         v2vNote.textContent = "· canvas follows the footage (reading dims…)";
                     }
+                }
+            }
+            {
+                const mf = String(widgetValue(node, "motion_context_file", "")).trim();
+                mcLabel.textContent = mf ? mf.replace(/\s*\[\w+\]\s*$/, "")
+                    : "none — joins re-decide motion from a still";
+                mcLabel.style.color = mf ? COL.green : COL.text;
+                mcClear.style.display = mf ? "" : "none";
+                const nF = Math.max(1, Number(widgetValue(node, "motion_context_frames", 22)) || 22);
+                if (document.activeElement !== mcFrames) mcFrames.value = String(nF);
+                if (document.activeElement !== mcAudio)
+                    mcAudio.value = String(Math.max(0, Number(widgetValue(node, "motion_context_audio_frames", 22)) || 0));
+                if (document.activeElement !== mcEnd)
+                    mcEnd.value = String(Number(widgetValue(node, "motion_context_end_seconds", 0)) || 0);
+                mcFrames.disabled = mcAudio.disabled = mcEnd.disabled = !mf;
+                mcNote.style.display = mf ? "" : "none";
+                if (mf) {
+                    const span = mcSpanFrames();
+                    const audioOn = (Number(widgetValue(node, "motion_context_audio_frames", 22)) || 0) > 0;
+                    mcNote.style.color = COL.green;
+                    mcNote.textContent = `· ${span}f (${(span / FPS).toFixed(2)}s) pinned at the head`
+                        + (span !== nF ? ` — snapped from ${nF}` : "")
+                        + (audioOn ? " · audio continues" : " · picture only");
+                    mcNote.title = "the render opens by repeating these context frames; 🎞 add-to-reel auto-trims them so an export never duplicates the join";
                 }
             }
             const firstSock = inputConnected(node, "first_frame");
@@ -5513,7 +5677,9 @@ function attachTimeline(node) {
         "first_frame_file", "last_frame_file", "middle_frame_files", "ref_image_files",
         "first_frame_crop", "last_frame_crop", "middle_frame_crops", "ref_image_crops",
         "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_crops",
-        "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds", "v2v_crop", "v2v_denoise"];
+        "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds", "v2v_crop", "v2v_denoise",
+        "motion_context_file", "motion_context_end_seconds",
+        "motion_context_frames", "motion_context_audio_frames"];
     let rawVisible = false;
     for (const name of HIDDEN_WIDGETS) setWidgetVisible(node, getWidget(node, name), false);
     node.addWidget("button", "⤢ open timeline editor", null, openFullscreen);
