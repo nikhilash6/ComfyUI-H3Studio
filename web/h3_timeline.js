@@ -4790,19 +4790,31 @@ function attachTimeline(node) {
             if (document.activeElement !== promptTA)
                 promptTA.value = widgetValue(node, "prompt", "");
             chipRow.textContent = "";
-            const chip = (label, insert, color) => {
+            const chip = (label, insert, color, img) => {
                 const b = el("button", {
                     ...btnStyle, padding: "1px 8px", fontSize: "11px",
                     color, borderColor: color,
                 }, label);
+                if (img?.src) {
+                    // the thumbnail IS the button: see what you're inserting
+                    Object.assign(b.style, {
+                        width: "76px", height: "46px", padding: "0 0 2px",
+                        backgroundImage: "linear-gradient(rgba(0,0,0,0.1) 40%, rgba(0,0,0,0.72)), url(" + JSON.stringify(img.src) + ")",
+                        backgroundSize: "cover", backgroundPosition: "center",
+                        display: "inline-flex", alignItems: "flex-end",
+                        justifyContent: "center", color: "#fff",
+                        textShadow: "0 1px 2px #000", fontWeight: "600",
+                    });
+                }
                 b.title = "insert " + insert.trim() + " at the cursor";
                 b.addEventListener("click", () => insertAtCaret(insert));
                 chipRow.appendChild(b);
             };
             for (const e of ents)
                 chip(`P${e.pic} ${e.kind === "mid" ? "waypoint" : e.kind}`,
-                    `<Picture ${e.pic}> `, e.kind === "mid" ? COL.mid : COL.cap);
-            for (const r of numbered.refs) chip(`P${r._pic} ref`, `<Picture ${r._pic}> `, COL.green);
+                    `<Picture ${e.pic}> `, e.kind === "mid" ? COL.mid : COL.cap, e.img);
+            for (const r of numbered.refs)
+                chip(`P${r._pic} ref`, `<Picture ${r._pic}> `, COL.green, refImg(r));
             for (const vch of numbered.videos) chip(`V${vch.num} video`, `<Video ${vch.num}> `, COL.green);
             for (const vch of numbered.videos)
                 if (vch.aNum) chip(`A${vch.aNum} ♪`, `<Audio ${vch.aNum}> `, COL.green);
