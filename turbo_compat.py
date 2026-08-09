@@ -107,6 +107,11 @@ def correct_unique_t(timestep, shift_v, shift_a, payload, transformer_options):
     s = {t_v, t_a}
     if has_vis:
         s.add(max(t_v, vis))
+        # per-row softened labels (h3_row_aug_patch): the E-grid interpolates at
+        # arbitrary t, and the patched _forward maps segments by the same sorted
+        # set -- so the turbo table only needs the extra values present
+        for a in (payload.get("cond_video_noise_augs") or ()):
+            s.add(max(t_v, float(a)))
     if has_aud:
         s.add(max(t_a, aud))
     return sorted(s)

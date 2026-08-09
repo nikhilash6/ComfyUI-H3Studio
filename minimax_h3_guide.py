@@ -564,14 +564,10 @@ def flow_blend(z, a, seed):
 
 
 def row_aug_ready():
-    """Per-row labels need the source patch and are disabled under the turbo
-    LoRA (its rebuilt adaln table maps rows by kind, not per segment)."""
-    if turbo_compat.turbo_present():
-        if not getattr(row_aug_ready, "_warned", False):
-            row_aug_ready._warned = True
-            logging.info("MiniMaxH3Guide: turbo LoRA active -- sub-1.0 strengths "
-                         "use the blended fallback (labels stay global).")
-        return False
+    """Per-row labels just need the source patch. Turbo included: its rebuilt
+    adaln E-grid interpolates at arbitrary timesteps and turbo_compat's
+    correct_unique_t feeds it the per-row values, while segment assignment
+    comes from the same patched _forward table."""
     return h3_row_aug_patch.install()
 
 

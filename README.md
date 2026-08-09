@@ -315,11 +315,11 @@ clean image that happens to be full of static" (which it dutifully painted into
 the clip as distortion — the earlier behavior). Each keyframe and reference
 carries its own label, which core's single global knob cannot do.
 
-When the label patch can't install (core drift upstream, or the turbo LoRA,
-whose rebuilt modulation table maps rows by kind), the node falls back to the
-linear blend with the global label — noticeably better than the old
-variance-preserving blend, but softer strengths may still drift; the log says
-when this happens.
+Works with the turbo LoRA too — its rebuilt modulation grid interpolates at
+arbitrary timesteps, and the compat shim feeds it the per-row values. When the
+label patch can't install (core drift upstream), the node falls back to the
+linear blend with the global label — better than the old variance-preserving
+blend, but softer strengths may drift; the log says when this happens.
 
 Each frame gets its **own noise stream**. Core reuses a single stream for every
 condition latent, which is harmless when only one is diluted — but weaken both
