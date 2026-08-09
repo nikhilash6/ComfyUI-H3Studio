@@ -2327,6 +2327,7 @@ function attachTimeline(node) {
         if (!f) return;
         state.fs = null;
         window.removeEventListener("keydown", f.onKey, true);
+        for (const [ev, fn] of f.apiEvents || []) api.removeEventListener(ev, fn);
         f.root.remove();
         renderSummary();
     }
@@ -2452,18 +2453,163 @@ function attachTimeline(node) {
             display: "flex", alignItems: "center", gap: "5px",
         });
         stats.append(wField, el("span", null, "×"), hField, lockBtn, aspectSel,
-            el("span", null, "px ·"), lenField, snapNote);
+            el("span", null, "px ·"), lenField, snapNote, qWrap);
 
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
+        // ---- run tracking: progress strip + live preview + result panel ----
+        const run = { armed: false, pid: null, previewURL: null };
+        const qWrap = el("span", { display: "none", alignItems: "center", gap: "6px" });
+        const qBar = el("div", {
+            width: "110px", height: "6px", background: "#2a2a2a",
+            borderRadius: "3px", overflow: "hidden",
+        });
+        const qFill = el("div", {
+            width: "0%", height: "100%", background: COL.green, borderRadius: "3px",
+        });
+        qBar.appendChild(qFill);
+        const qText = el("span", { color: COL.text, fontSize: "11px", whiteSpace: "nowrap" }, "");
+        qWrap.append(qBar, qText);
+
+        const resPanel = el("div", {
+            position: "absolute", right: "18px", bottom: "54px", zIndex: "5",
+            width: "324px", background: COL.panel, border: `1px solid ${COL.border}`,
+            borderRadius: "8px", overflow: "hidden", display: "none",
+            boxShadow: "0 10px 36px rgba(0,0,0,0.65)",
+        });
+        const resHead = el("div", {
+            display: "flex", alignItems: "center", gap: "8px",
+            padding: "6px 10px", borderBottom: `1px solid ${COL.divider}`,
+        });
+        const resTitle = el("span", { color: COL.bright, fontSize: "12px", flex: "1" }, "");
+        const resClose = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "✕");
+        resClose.addEventListener("click", () => { resPanel.style.display = "none"; });
+        resHead.append(resTitle, resClose);
+        const resBody = el("div", { background: "#000", minHeight: "60px" });
+        const resFoot = el("div", { display: "none", gap: "6px", padding: "6px 8px", flexWrap: "wrap" });
+        resPanel.append(resHead, resBody, resFoot);
+
+        const showPanel = (title) => {
+            resTitle.textContent = title;
+            resPanel.style.display = "";
+        };
+        const setPreviewFrame = (blob) => {
+            if (run.previewURL) URL.revokeObjectURL(run.previewURL);
+            run.previewURL = URL.createObjectURL(blob);
+            let im = resBody.firstChild;
+            if (!im || im.tagName !== "IMG") {
+                resBody.textContent = "";
+                im = el("img", { width: "100%", display: "block" });
+                resBody.appendChild(im);
+            }
+            im.src = run.previewURL;
+            resFoot.style.display = "none";
+            showPanel("rendering…");
+        };
+        const showResult = (name, isVideo) => {
+            resBody.textContent = "";
+            if (isVideo) {
+                const v = el("video", { width: "100%", display: "block" });
+                v.controls = true; v.autoplay = true; v.loop = true; v.muted = true;
+                v.src = inputFileUrl(name);
+                resBody.appendChild(v);
+            } else {
+                const im = el("img", { width: "100%", display: "block", cursor: "zoom-in" });
+                im.src = inputFileUrl(name);
+                im.addEventListener("click", () => openLightbox(im));
+                resBody.appendChild(im);
+            }
+            resFoot.textContent = "";
+            resFoot.style.display = "flex";
+            if (isVideo) {
+                const chainB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
+                    "⏭ last frame → first");
+                chainB.title = "continue this clip: extract its final frame and set it as the next first frame";
+                chainB.addEventListener("click", () => finalFrameToFirst(name));
+                const refB = el("button", { ...btnStyle, fontSize: "11px" }, "+ as video ref");
+                refB.title = "carry this clip's motion and sound into the next one as a reference video";
+                refB.addEventListener("click", () => addFileVideo(name));
+                resFoot.append(chainB, refB);
+            } else {
+                const useB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
+                    "use as first frame");
+                useB.addEventListener("click", () => {
+                    setWidget("first_frame_file", name);
+                    setWidget("first_frame_crop", "");
+                    refresh(true);
+                });
+                resFoot.append(useB);
+            }
+            showPanel("render finished");
+        };
+        const pickOutput = (output) => {
+            // scan every array in the executed payload for saved files; prefer video
+            let img = null;
+            for (const key of Object.keys(output || {})) {
+                const arr = output[key];
+                if (!Array.isArray(arr)) continue;
+                for (const it of arr) {
+                    if (!it || typeof it !== "object" || !it.filename) continue;
+                    const name = (it.subfolder ? it.subfolder + "/" : "") + it.filename
+                        + " [" + (it.type || "output") + "]";
+                    if (VIDEO_EXT.test(it.filename)) return { name, video: true };
+                    if (!img) img = { name, video: false };
+                }
+            }
+            return img;
+        };
         queueBtn.addEventListener("click", async () => {
             try {
+                run.armed = true;   // adopt the next execution_start as ours
+                run.pid = null;
                 await app.queuePrompt(0);
-                toast("queued — rendering with the current setup");
+                qWrap.style.display = "inline-flex";
+                qFill.style.width = "0%";
+                qText.textContent = "queued…";
+                toast("queued — progress and the result will show right here");
             } catch (e) {
+                run.armed = false;
                 toast("queue failed: " + (e?.message || e), true);
             }
         });
+
+        const onExecStart = ({ detail }) => {
+            if (run.armed) { run.pid = detail?.prompt_id ?? null; run.armed = false; }
+        };
+        const onProgress = ({ detail }) => {
+            if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
+            if (!detail?.max) return;
+            qWrap.style.display = "inline-flex";
+            qFill.style.width = Math.round(detail.value / detail.max * 100) + "%";
+            qText.textContent = `step ${detail.value}/${detail.max}`;
+        };
+        const onPreview = ({ detail }) => {
+            // b_preview carries no prompt id — only show while OUR run is live
+            if (run.pid === null || !(detail instanceof Blob)) return;
+            setPreviewFrame(detail);
+        };
+        const onExecuted = ({ detail }) => {
+            if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
+            const got = pickOutput(detail?.output);
+            if (got) showResult(got.name, got.video);
+        };
+        const onDone = ({ detail }) => {
+            if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
+            qText.textContent = "done";
+            qFill.style.width = "100%";
+            setTimeout(() => { qWrap.style.display = "none"; }, 2500);
+            run.pid = null;
+        };
+        const onExecError = ({ detail }) => {
+            if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
+            qText.textContent = "failed — see the graph";
+            qFill.style.background = COL.red;
+            run.pid = null;
+        };
+        const apiEvents = [["execution_start", onExecStart], ["progress", onProgress],
+            ["b_preview", onPreview], ["executed", onExecuted],
+            ["execution_success", onDone], ["execution_error", onExecError]];
+        for (const [ev, fn] of apiEvents) api.addEventListener(ev, fn);
         const swapBtn = el("button", btnStyle, "⇄ reverse");
         swapBtn.addEventListener("click", () => {
             if (swapBtn.disabled) return;
@@ -4757,8 +4903,9 @@ function attachTimeline(node) {
 
         const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => renderTrack()) : null;
         ro?.observe(main);
+        root.appendChild(resPanel);   // render results dock over the editor
         document.body.appendChild(root);
-        state.fs = { root, onKey, fill, renderTrack, ro };
+        state.fs = { root, onKey, fill, renderTrack, ro, apiEvents };
         fill();
     }
     node._h3OpenFS = openFullscreen;
