@@ -587,6 +587,33 @@ Load Video → Get Video Components ─┬─→ H3 Frame Range (2.0s–5.0s)
   untouched footage** (output-tab picker + framer on the Guide node) so the
   joins can't drift.
 
+### Soft denoise zones (differential diffusion for H3)
+
+**H3 Soft Denoise Zone (v2v)** gives v2v a spatially-varying denoise: a
+feathered circle (dials on the node) or any MASK input, where white areas get
+`inner_denoise`, black get `outer_denoise`, and greys blend — as *fractions of
+the sampler's own denoise*, which stays the master dial. The classic ask —
+"reinvent the subject in the centre, barely touch the environment" — is
+`inner 1.0 / outer 0.3` with a wide feather.
+
+Mechanically this is Differential Diffusion (the same idea core ComfyUI ships
+for image models): the soft map is thresholded against sampling progress every
+step, and not-yet-participating pixels are re-injected from the clean footage
+latent — re-noised to the current sigma on the way in, pinned to the footage
+in the denoised prediction on the way out. All blending happens in noise
+space, per step, which is why soft maps give seamless transitions instead of
+matte lines. Core's node can't run on H3 (the AV latent is a packed
+video/audio pair the mask plumbing was never wired for), so this node
+implements the loop in a model wrapper: video stream only, audio untouched,
+composes with the wired-denoise scheduler or any other. Wire the Guide's v2v
+LATENT into both the node and the sampler.
+
+**EXPERIMENTAL** — to our knowledge the first spatially-varying denoise on
+H3. Verified headlessly (threshold maths, flow re-noising, run detection,
+mask path — 18 checks); the perceptual result on a video model with global
+attention is exactly the thing only a render can prove. If the feather band
+shows content disagreement, widen the feather.
+
 ### v2v from the Guide node itself
 
 You don't need the standalone nodes for the common case — the Guide node takes

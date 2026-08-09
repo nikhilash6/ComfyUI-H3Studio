@@ -1329,9 +1329,10 @@ class MiniMaxH3GuideExtension(ComfyExtension):
         from .h3_v2v import H3VideoToLatent, H3FrameRange, H3Splice
         from .h3_temporal_lora import H3TemporalLoraBlend
         from .h3_v2v import H3BasicScheduler
+        from .h3_diff_v2v import H3SoftDenoiseZone
         return [MiniMaxH3ImageToVideoGuide, LoadImageZoomPan,
                 H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend,
-                H3BasicScheduler]
+                H3BasicScheduler, H3SoftDenoiseZone]
 
 
 async def comfy_entrypoint() -> MiniMaxH3GuideExtension:
