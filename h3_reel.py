@@ -125,6 +125,7 @@ def register():
         fps = float(body.get("fps") or 24.0)
         fade_in = max(0.0, float(body.get("fade_in") or 0.0))
         fade_out = max(0.0, float(body.get("fade_out") or 0.0))
+        music = body.get("music") if isinstance(body.get("music"), dict) else None
         if not isinstance(clips, list) or not (1 <= len(clips) <= 64):
             return web.json_response({"error": "clips must be a list of 1-64 entries"},
                                      status=400)
@@ -132,15 +133,15 @@ def register():
         # every other request (previews, even queue POSTs) stalls behind it
         try:
             payload, status = await asyncio.to_thread(_do_export, clips, fps,
-                                                      fade_in, fade_out)
+                                                      fade_in, fade_out, music)
         except Exception as exc:
             logging.exception("MiniMaxH3Guide: reel export failed")
             return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
                                      status=500)
         return web.json_response(payload, status=status)
 
-    def _do_export(clips, fps, fade_in, fade_out):
-        from .minimax_h3_guide import _resize, load_input_video
+    def _do_export(clips, fps, fade_in, fade_out, music=None):
+        from .minimax_h3_guide import _resize, load_input_video, load_input_audio
 
         pieces = []          # [{frames, audio, xfade_next_frames}]
         base_w = base_h = None
@@ -208,6 +209,21 @@ def register():
                 _declick(a, sr, head=True)
                 out_f = torch.cat([out_f, f], dim=0)
                 out_a = torch.cat([out_a, a], dim=-1)
+
+        # music bed (the editor's ♪ guide track) mixed UNDER the clip audio at
+        # the chosen level — before the fades, so it fades with everything else
+        if music and music.get("name") and float(music.get("level") or 0) > 0:
+            try:
+                bed = load_input_audio(str(music["name"]), "reel music")
+                lvl = max(0.0, min(1.5, float(music.get("level") or 0)))
+                start = max(0.0, float(music.get("from") or 0.0))
+                bed_wf = _clip_audio(bed, int(round(start * fps)), out_f.shape[0],
+                                     fps, sr, channels)
+                out_a = out_a + bed_wf * lvl
+                logging.info("MiniMaxH3Guide: reel music bed mixed — %r at %.0f%% "
+                             "from %.1fs", music["name"], lvl * 100, start)
+            except Exception:
+                logging.exception("MiniMaxH3Guide: music bed failed — exporting without it")
 
         # whole-reel fades: video to black, audio to silence
         if fade_in > 0:

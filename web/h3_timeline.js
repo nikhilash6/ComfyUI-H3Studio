@@ -4164,11 +4164,28 @@ function attachTimeline(node) {
             const mkV = () => {
                 const v = document.createElement("video");
                 v.preload = "auto";
-                v.volume = 0.7;
+                v.volume = 1.0;   // full level — the point is judging the mix
                 Object.assign(v.style, { width: "100%", display: "none", background: "#000" });
                 return v;
             };
             const vids = [mkV(), mkV()];
+            // ♪ music bed: same mapping as the export — song time 0 (follow
+            // mode) or the guide offset lands at reel time 0; resynced at every
+            // cut so drift can't accumulate. Preview volume caps at 100%.
+            const gMus = node.properties?.h3_guide || {};
+            const musicFrom = gMus.follow ? 0 : (Number(gMus.offset) || 0);
+            let music = null, reelClock = 0;
+            if (gMus.name) {
+                music = document.createElement("audio");
+                music.preload = "auto";
+                music.src = inputFileUrl(gMus.name);
+                music.volume = Math.min(1, Number(gMus.level) || 0);
+            }
+            const syncMusic = (withinClip) => {
+                if (!music) return;
+                music.currentTime = musicFrom + reelClock + (withinClip || 0);
+                music.play().catch(() => {});
+            };
             const entry = (i) => list[i % n];
             const prep = (v, i) => {
                 const e = entry(i);
@@ -4197,7 +4214,9 @@ function attachTimeline(node) {
                     wrap.appendChild(v);
                 }
                 const note = el("div", { color: COL.text, fontSize: "11px", padding: "6px 12px 10px" },
-                    "trims applied · joins play as hard cuts — crossfades, fades and luma-match are applied at export · click the picture to pause · loops");
+                    "trims applied · joins play as hard cuts — crossfades, fades and luma-match are applied at export"
+                    + (music ? " · ♪ music previews at the export level (slider up top)" : "")
+                    + " · click the picture to pause · loops");
                 panel.append(head, wrap, note);
                 root.appendChild(panel);
 
@@ -4218,15 +4237,22 @@ function attachTimeline(node) {
                 };
                 const advance = () => {
                     const old = vids[act];
+                    // reel time advances by the finished clip's kept duration
+                    const eOld = entry(idx);
+                    const dOld = isFinite(old.duration) ? old.duration : 0;
+                    const outOld = eOld.out > 0 ? Math.min(eOld.out, dOld || eOld.out) : dOld;
+                    reelClock += Math.max(0, outOld - (eOld.in || 0));
                     old.pause();
                     old.style.display = "none";
                     act = 1 - act;
                     idx += 1;
+                    if (idx % n === 0) reelClock = 0;   // reel looped — restart the song
                     const e = entry(idx), v = vids[act];
                     v.style.display = "block";
                     const go = () => {
                         if (stopped) return;
                         v.play().catch(() => {});
+                        syncMusic(0);
                         paintLabel();
                         raf = requestAnimationFrame(tick);
                     };
@@ -4247,8 +4273,15 @@ function attachTimeline(node) {
                     });
                 wrap.addEventListener("click", () => {
                     const v = vids[act];
-                    if (v.paused) { v.play().catch(() => {}); raf = requestAnimationFrame(tick); }
-                    else v.pause();
+                    if (v.paused) {
+                        v.play().catch(() => {});
+                        const e = entry(idx);
+                        syncMusic(Math.max(0, v.currentTime - (e.in || 0)));
+                        raf = requestAnimationFrame(tick);
+                    } else {
+                        v.pause();
+                        if (music) music.pause();
+                    }
                 });
                 // start: first clip visible + playing, second preloading
                 prep(vids[0], 0);
@@ -4261,14 +4294,41 @@ function attachTimeline(node) {
                     if (Math.abs(vids[0].currentTime - (e0.in || 0)) > 0.2)
                         vids[0].currentTime = e0.in || 0;
                     vids[0].play().catch(() => {});
+                    syncMusic(0);
                     raf = requestAnimationFrame(tick);
                 });
+                // live music level: writes the same h3_guide.level the export
+                // uses, so what you dial here IS the export mix
+                if (music) {
+                    const mWrap = el("span", { display: "inline-flex", gap: "5px", alignItems: "center" });
+                    mWrap.appendChild(el("span", { color: COL.text, fontSize: "11px" }, "♪"));
+                    const mSl = el("input");
+                    mSl.type = "range"; mSl.min = "0"; mSl.max = "150"; mSl.step = "5";
+                    mSl.value = String(Math.round((Number(gMus.level) || 0) * 100));
+                    Object.assign(mSl.style, { width: "90px", accentColor: COL.slider, cursor: "pointer" });
+                    mSl.title = "music level for the EXPORT, previewed here live (above 100% boosts in the export; the preview caps at 100%)";
+                    const mVal = el("span", { color: COL.bright, fontSize: "11px",
+                        fontFamily: "monospace", minWidth: "34px" }, mSl.value + "%");
+                    mSl.addEventListener("input", () => {
+                        const v = parseInt(mSl.value, 10);
+                        mVal.textContent = v + "%";
+                        node.properties = node.properties || {};
+                        node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v / 100 };
+                        music.volume = Math.min(1, v / 100);
+                        state.fs?.fill?.();   // keep the reel header field in step
+                    });
+                    mWrap.append(mSl, mVal);
+                    head.insertBefore(mWrap, doneB);
+                }
                 paintLabel();
             }, () => {
                 stopped = true;
                 cancelAnimationFrame(raf);
                 for (const v of vids) {
                     try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {}
+                }
+                if (music) {
+                    try { music.pause(); music.removeAttribute("src"); music.load(); } catch (e) {}
                 }
             });
         }
@@ -4674,6 +4734,7 @@ function attachTimeline(node) {
             exportB.textContent = "exporting…";
             try {
                 const fx = fxGet();
+                const g2 = node.properties?.h3_guide || {};
                 const r = await api.fetchApi("/h3guide/reel_export", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -4683,6 +4744,10 @@ function attachTimeline(node) {
                         fade_in: fx.fadeIn || 0,
                         fade_out: fx.fadeOut || 0,
                         fps: FPS,
+                        music: g2.name && (Number(g2.level) || 0) > 0
+                            ? { name: g2.name, level: Number(g2.level),
+                                from: g2.follow ? 0 : (Number(g2.offset) || 0) }
+                            : null,
                     }),
                 });
                 const j = await r.json();
@@ -4718,10 +4783,27 @@ function attachTimeline(node) {
         };
         const fadeInF = fxField("fade in", "fadeIn");
         const fadeOutF = fxField("fade out", "fadeOut");
+        // ♪ music bed level for the EXPORT (and the play-reel preview) — the
+        // guide track file, mixed under the clip audio at this percent
+        const musicLab = el("span", { color: COL.text, fontSize: "11px", display: "none" }, "♪ music");
+        const musicF = el("input");
+        Object.assign(musicF.style, {
+            width: "42px", background: COL.input, color: COL.bright,
+            border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
+            padding: "2px 4px", fontFamily: "monospace", textAlign: "center", display: "none",
+        });
+        musicF.title = "mix the ♪ guide track under the exported reel at this level, in percent (0 = keep the guide display-only). The song starts at reel time 0 in follow-reel mode, or at the guide's offset otherwise. ▶ play reel previews the mix live.";
+        musicF.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") musicF.blur(); });
+        musicF.addEventListener("blur", () => {
+            const v = Math.max(0, Math.min(150, parseFloat(musicF.value) || 0));
+            musicF.value = String(Math.round(v));
+            node.properties = node.properties || {};
+            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v / 100 };
+        });
         const playReelB = el("button", { ...btnStyle, color: COL.green }, "▶ play reel");
         playReelB.title = "preview the chain as it stands, without exporting — trims respected, joins as hard cuts (crossfades, fades and luma-match only apply at export)";
         playReelB.addEventListener("click", () => openReelPlayer());
-        reelCtl.append(undoB, playReelB,
+        reelCtl.append(undoB, playReelB, musicLab, musicF,
             el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
             reelAddB, rerollB, exportB);
@@ -6092,6 +6174,10 @@ function attachTimeline(node) {
                 for (const elx of [guideOffLab, guideOff, gFollow.wrapEl, gSnap.wrapEl,
                                    guideRefB, guideClr])
                     elx.style.display = on ? "" : "none";
+                musicLab.style.display = on ? "" : "none";
+                musicF.style.display = on ? "" : "none";
+                if (on && document.activeElement !== musicF)
+                    musicF.value = String(Math.round((Number(g.level) || 0) * 100));
                 if (on) {
                     guideOff.disabled = !!g.follow;
                     if (document.activeElement !== guideOff) {
