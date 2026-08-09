@@ -2738,11 +2738,22 @@ function attachTimeline(node) {
             showPanel("rendering…");
         };
         const showResult = (name, isVideo) => {
+            const renderedSpan = run.mcSpan;   // captured at queue time
             resBody.textContent = "";
             if (isVideo) {
                 const v = el("video", { width: "100%", display: "block" });
                 v.controls = true; v.autoplay = true; v.loop = true; v.muted = true;
                 v.src = inputFileUrl(name);
+                if (renderedSpan > 0) {
+                    // a motion-context render opens by repeating the pinned tail
+                    // (that IS the context) — preview the clip as it will appear
+                    // after the reel's auto-trim, not the raw file
+                    const head = renderedSpan / FPS;
+                    v.addEventListener("loadedmetadata", () => { v.currentTime = head; });
+                    v.addEventListener("timeupdate", () => {
+                        if (v.currentTime < head - 0.04) v.currentTime = head;
+                    });
+                }
                 resBody.appendChild(v);
             } else {
                 const im = el("img", { width: "100%", display: "block", cursor: "zoom-in" });
@@ -2762,7 +2773,6 @@ function attachTimeline(node) {
                 refB.addEventListener("click", () => addFileVideo(name));
                 const reelB = el("button", { ...btnStyle, fontSize: "11px" }, "🎞 add to reel");
                 reelB.title = "append this clip to the chain at the bottom";
-                const renderedSpan = run.mcSpan;   // captured at queue time
                 reelB.addEventListener("click", () => {
                     reelAdd(name);
                     if (renderedSpan > 0) {
@@ -2781,6 +2791,12 @@ function attachTimeline(node) {
                     reelB.disabled = true;
                 });
                 resFoot.append(chainB, refB, reelB);
+                if (renderedSpan > 0)
+                    resFoot.append(el("span", {
+                        color: COL.text, fontSize: "10px", flexBasis: "100%",
+                    }, `⏭▶ the raw file opens by repeating the ${(renderedSpan / FPS).toFixed(2)}s `
+                        + `context head (that's the motion carrier) — this preview skips it, `
+                        + `and 🎞 add to reel trims it from any export automatically`));
             } else {
                 const useB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
                     "use as first frame");
