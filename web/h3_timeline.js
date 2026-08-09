@@ -1444,6 +1444,12 @@ function attachTimeline(node) {
         node.properties = node.properties || {};
         node.properties.h3_reel = list;
         state.fs?.renderReel?.();
+        // follow mode tracks the newest clip live, so the MOTION bar and the
+        // timeline hatch never show a stale continuation source
+        if (mcFollowOn()) {
+            mcApplyFollow();
+            state.fs?.fill?.();
+        }
     }
     function reelAdd(name) {
         const list = reelGet();
@@ -1462,23 +1468,28 @@ function attachTimeline(node) {
         if (!String(widgetValue(node, "motion_context_file", "")).trim()) return 0;
         return mcSnap(Math.max(1, Number(widgetValue(node, "motion_context_frames", 22)) || 22));
     }
-    function continueWithMotion(videoName, atSeconds) {
-        reelAdd(videoName);   // a continuation docks its source in the chain
-        setWidget("motion_context_file", videoName);
-        setWidget("motion_context_end_seconds",
-            atSeconds && atSeconds > 0 ? Math.round(atSeconds * 100) / 100 : 0);
-        // the context IS the opening — python ignores first_frame anyway, but a
-        // stale thumbnail lying about the opening would mislead
-        if (!inputConnected(node, "first_frame")
-            && String(widgetValue(node, "first_frame_file", "")).trim()) {
-            setWidget("first_frame_file", "");
-            setWidget("first_frame_crop", "");
+    // follow-reel mode: motion continuation is decided AT QUEUE TIME — every
+    // queue continues from the reel's newest clip (honoring its out-trim). The
+    // widgets are just the resolved snapshot; the reel is the source of truth.
+    function mcFollowOn() {
+        return !!node.properties?.h3_mc_follow;
+    }
+    function mcApplyFollow() {
+        if (!mcFollowOn()) return false;
+        const list = reelGet();
+        const newest = list[list.length - 1];
+        if (!newest) {
+            // nothing to continue — make sure no stale context file lingers
+            if (String(widgetValue(node, "motion_context_file", "")).trim()) {
+                setWidget("motion_context_file", "");
+                setWidget("motion_context_end_seconds", 0);
+            }
+            return false;
         }
-        refresh(true);
-        const span = mcSpanFrames();
-        toast(`⏭▶ motion context set — ${span} tail frames + audio pinned, so motion and `
-            + `sound continue through the join. The pinned ${(span / FPS).toFixed(2)}s head `
-            + `is auto-trimmed when the render joins the reel.`);
+        setWidget("motion_context_file", newest.name);
+        setWidget("motion_context_end_seconds",
+            newest.out > 0 ? Math.round(newest.out * 100) / 100 : 0);
+        return true;
     }
 
     function finalFrameToFirst(videoName, atSeconds) {
@@ -1487,12 +1498,15 @@ function attachTimeline(node) {
             toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph, then press ⏭ again", true);
             return;
         }
-        if (String(widgetValue(node, "motion_context_file", "")).trim()) {
-            // plain ⏭ means "last frame → first" — a leftover context would
-            // silently override the very frame this button just set
+        if (mcFollowOn() || String(widgetValue(node, "motion_context_file", "")).trim()) {
+            // plain ⏭ means "last frame → first" — a live context (or the
+            // follow toggle re-arming one at queue time) would silently
+            // override the very frame this button just set
+            node.properties = node.properties || {};
+            node.properties.h3_mc_follow = false;
             setWidget("motion_context_file", "");
             setWidget("motion_context_end_seconds", 0);
-            toast("motion context cleared — plain ⏭ continues from the still frame only");
+            toast("⏭▶ motion continuation turned off — plain ⏭ continues from the still frame only");
         }
         extractLastFrame(videoName, (fname) => {
             setWidget("first_frame_file", fname);
@@ -2690,10 +2704,6 @@ function attachTimeline(node) {
                     "⏭ last frame → first");
                 chainB.title = "continue this clip: extract its final frame and set it as the next first frame";
                 chainB.addEventListener("click", () => finalFrameToFirst(name));
-                const motB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
-                    "⏭▶ with motion");
-                motB.title = "continue this clip WITH MOTION: its tail frames + audio are pinned at the next clip's head, so motion and the actual sound carry through the join (costs extra conditioning rows; the pinned head is auto-trimmed on the reel)";
-                motB.addEventListener("click", () => continueWithMotion(name));
                 const refB = el("button", { ...btnStyle, fontSize: "11px" }, "+ as video ref");
                 refB.title = "carry this clip's motion and sound into the next one as a reference video";
                 refB.addEventListener("click", () => addFileVideo(name));
@@ -2717,7 +2727,7 @@ function attachTimeline(node) {
                     reelB.textContent = "✓ in reel";
                     reelB.disabled = true;
                 });
-                resFoot.append(chainB, motB, refB, reelB);
+                resFoot.append(chainB, refB, reelB);
             } else {
                 const useB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
                     "use as first frame");
@@ -2748,6 +2758,10 @@ function attachTimeline(node) {
         };
         queueBtn.addEventListener("click", async () => {
             try {
+                // follow mode resolves its continuation source NOW: the reel's
+                // newest clip, out-trim included — "queue = continue the chain"
+                if (mcFollowOn() && !mcApplyFollow())
+                    toast("reel is empty — queuing plain (⏭▶ engages once a clip is in the reel)");
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
@@ -3053,16 +3067,38 @@ function attachTimeline(node) {
             fill();
         };
         for (const f of [mcFrames, mcAudio, mcEnd]) f.addEventListener("blur", commitMc);
+        const mcFollowB = el("button", btnStyle, "⏭▶ continue the reel");
+        mcFollowB.title = "when ON, every ▶ queue continues WITH MOTION from the reel's newest clip (its out-trim respected, resolved at queue time): tail frames + audio are pinned so motion and sound carry through the join. The loop: render → 🎞 add to reel → queue again.";
+        mcFollowB.addEventListener("click", () => {
+            node.properties = node.properties || {};
+            const on = !node.properties.h3_mc_follow;
+            node.properties.h3_mc_follow = on;
+            if (on) {
+                const armed = mcApplyFollow();
+                toast(armed
+                    ? "⏭▶ ON — every queue now continues the reel's newest clip with motion + audio"
+                    : "⏭▶ ON — engages at queue time once a clip is in the reel");
+            } else {
+                setWidget("motion_context_file", "");
+                setWidget("motion_context_end_seconds", 0);
+                toast("⏭▶ off — queues render independently again");
+            }
+            refresh(true);
+        });
         const mcPick = el("button", btnStyle, "pick clip…");
-        mcPick.title = "continue WITH MOTION from an existing video (output tab = previous renders): its tail frames + audio are pinned at this clip's head";
+        mcPick.title = "continue WITH MOTION from a specific video instead of the reel's newest (output tab = previous renders) — turns the follow toggle off";
         mcPick.addEventListener("click", () => openVideoPicker((n) => {
+            node.properties = node.properties || {};
+            node.properties.h3_mc_follow = false;   // explicit source wins
             setWidget("motion_context_file", n);
             setWidget("motion_context_end_seconds", 0);   // new clip, old cut point is meaningless
             refresh(true);
         }));
         const mcClear = el("button", { ...btnStyle, color: COL.red, padding: "1px 7px" }, "✕");
-        mcClear.title = "clear the motion context (joins go back to plain cuts / still-frame continuation)";
+        mcClear.title = "stop continuing with motion (joins go back to plain cuts / still-frame continuation)";
         mcClear.addEventListener("click", () => {
+            node.properties = node.properties || {};
+            node.properties.h3_mc_follow = false;
             setWidget("motion_context_file", "");
             setWidget("motion_context_end_seconds", 0);
             refresh(true);
@@ -3072,7 +3108,7 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "audio"), mcAudio,
             el("span", { color: COL.text, fontSize: "11px" }, "end"), mcEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            mcPick, mcClear);
+            mcFollowB, mcPick, mcClear);
 
         // ---- motion path: Ken Burns through the model -----------------------
         // Two windows (A=start, B=end) over one image; the chosen curve places
@@ -3533,6 +3569,187 @@ function attachTimeline(node) {
             });
         }
 
+        // big trim view for a reel card: full-size preview, draggable in/out
+        // handles, looped playback of the kept range. Non-destructive — the
+        // trim lives on the reel entry and only applies at export.
+        function openReelTrim(index) {
+            const entry0 = reelGet()[index];
+            if (!entry0) return;
+            const name = entry0.name;
+            const cur = { in: entry0.in || 0, out: entry0.out || 0 };
+            const vv = document.createElement("video");
+            vv.preload = "auto";
+            vv.volume = 0.5;
+            vv.src = inputFileUrl(name);
+            const commit = () => {
+                const l = reelGet();
+                let i = index;
+                if (l[i]?.name !== name) i = l.findIndex((e) => e.name === name);
+                if (i < 0) return;
+                l[i] = { ...l[i], in: cur.in, out: cur.out };
+                reelSet(l);   // re-renders the reel row (this modal is separate DOM)
+            };
+            openModal((root) => {
+                const panel = el("div", {
+                    background: COL.bg, border: `1px solid ${COL.border}`, borderRadius: "8px",
+                    display: "flex", flexDirection: "column", overflow: "hidden",
+                    fontFamily: "sans-serif", maxWidth: "92vw",
+                });
+                const head = el("div", {
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
+                });
+                head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
+                    `✂ Trim clip ${index + 1} — drag the handles or scrub and use the buttons. Nothing is baked until export.`));
+                const doneB = el("button", { ...btnStyle, color: COL.green }, "done");
+                doneB.addEventListener("click", closeModal);
+                head.appendChild(doneB);
+
+                Object.assign(vv.style, {
+                    display: "block", maxWidth: "min(880px, 88vw)", maxHeight: "56vh",
+                    background: "#000",
+                });
+                const strip2 = el("div", {
+                    position: "relative", height: "34px", margin: "10px 12px 4px",
+                    background: "#101010", border: `1px solid ${COL.border}`,
+                    borderRadius: "4px", cursor: "pointer",
+                });
+                const selBand = el("div", {
+                    position: "absolute", top: "0", bottom: "0",
+                    background: "rgba(158,228,147,0.25)", pointerEvents: "none",
+                });
+                const playHead = el("div", {
+                    position: "absolute", top: "0", bottom: "0", width: "2px",
+                    background: COL.bright, pointerEvents: "none",
+                });
+                const mkHandle = () => el("div", {
+                    position: "absolute", top: "-4px", bottom: "-4px", width: "10px",
+                    background: COL.green, borderRadius: "3px", cursor: "ew-resize",
+                    touchAction: "none",
+                });
+                const hL = mkHandle(), hR = mkHandle();
+                hL.title = "in point — drag";
+                hR.title = "out point — drag (snap to the end = untrimmed)";
+                strip2.append(selBand, playHead, hL, hR);
+
+                const bar = el("div", {
+                    display: "flex", gap: "8px", alignItems: "center",
+                    padding: "6px 12px 12px", flexWrap: "wrap",
+                });
+                const playB = el("button", btnStyle, "▶");
+                const inB = el("button", btnStyle, "⟦ in here");
+                const outB = el("button", btnStyle, "out here ⟧");
+                const wholeB = el("button", btnStyle, "whole clip");
+                const readout = el("span", { color: COL.text, fontSize: "12px", flex: "1" });
+                bar.append(playB, inB, outB, wholeB, readout);
+                panel.append(head, vv, strip2, bar);
+                root.appendChild(panel);
+
+                const dur = () => (isFinite(vv.duration) && vv.duration > 0) ? vv.duration : 0;
+                const endOf = () => (cur.out > 0 ? Math.min(cur.out, dur() || cur.out) : dur());
+                const paint = () => {
+                    const d = dur();
+                    if (!d) { readout.textContent = "reading clip…"; return; }
+                    const a = (cur.in || 0) / d, b = endOf() / d;
+                    selBand.style.left = (a * 100) + "%";
+                    selBand.style.width = (Math.max(0, b - a) * 100) + "%";
+                    hL.style.left = "calc(" + (a * 100) + "% - 5px)";
+                    hR.style.left = "calc(" + (b * 100) + "% - 5px)";
+                    playHead.style.left = (vv.currentTime / d * 100) + "%";
+                    const trimmed = (cur.in || 0) > 0 || cur.out > 0;
+                    readout.textContent =
+                        `${vv.currentTime.toFixed(1)}s / ${d.toFixed(1)}s · keeping `
+                        + `${(cur.in || 0).toFixed(1)}–${endOf().toFixed(1)}s`
+                        + ` (${Math.max(0, endOf() - (cur.in || 0)).toFixed(1)}s)`
+                        + (trimmed ? "" : " — untrimmed");
+                    readout.style.color = trimmed ? COL.green : COL.text;
+                };
+                const seekTo = (ev) => {
+                    const r = strip2.getBoundingClientRect();
+                    if (dur()) vv.currentTime = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1) * dur();
+                };
+                strip2.addEventListener("pointerdown", (ev) => {
+                    seekTo(ev);
+                    strip2.setPointerCapture(ev.pointerId);
+                });
+                strip2.addEventListener("pointermove", (ev) => { if (ev.buttons) seekTo(ev); });
+                const dragHandle = (handle, which) => {
+                    handle.addEventListener("pointerdown", (ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();   // don't seek — this is a trim drag
+                        handle.setPointerCapture(ev.pointerId);
+                        const r = strip2.getBoundingClientRect();
+                        const move = (e2) => {
+                            const d = dur();
+                            if (!d) return;
+                            let t = Math.min(Math.max((e2.clientX - r.left) / r.width, 0), 1) * d;
+                            t = Math.round(t * 10) / 10;
+                            if (which === "in") {
+                                cur.in = Math.max(0, Math.min(t, endOf() - 0.2));
+                                vv.currentTime = cur.in;   // preview exactly what the cut keeps
+                            } else {
+                                cur.out = Math.max(t, (cur.in || 0) + 0.2);
+                                if (cur.out >= d - 0.05) cur.out = 0;   // snapped to end = untrimmed
+                                vv.currentTime = endOf() - 0.001;
+                            }
+                            paint();
+                        };
+                        const up = () => {
+                            handle.removeEventListener("pointermove", move);
+                            handle.removeEventListener("pointerup", up);
+                            commit();
+                        };
+                        handle.addEventListener("pointermove", move);
+                        handle.addEventListener("pointerup", up);
+                    });
+                };
+                dragHandle(hL, "in");
+                dragHandle(hR, "out");
+                vv.addEventListener("timeupdate", () => {
+                    // playback loops inside the kept range, like the export will
+                    if (!vv.paused && dur()
+                        && (vv.currentTime >= endOf() || vv.currentTime < (cur.in || 0) - 0.25))
+                        vv.currentTime = cur.in || 0;
+                    paint();
+                });
+                vv.addEventListener("loadedmetadata", paint);
+                vv.addEventListener("error", () => {
+                    readout.textContent = "couldn't decode this clip in the browser";
+                });
+                playB.addEventListener("click", () => {
+                    if (vv.paused) {
+                        if (dur() && (vv.currentTime < (cur.in || 0) || vv.currentTime >= endOf()))
+                            vv.currentTime = cur.in || 0;
+                        vv.play(); playB.textContent = "⏸";
+                    } else { vv.pause(); playB.textContent = "▶"; }
+                });
+                inB.addEventListener("click", () => {
+                    const t = Math.round(vv.currentTime * 10) / 10;
+                    cur.in = Math.max(0, Math.min(t, endOf() - 0.2));
+                    paint(); commit();
+                });
+                outB.addEventListener("click", () => {
+                    const t = Math.round(vv.currentTime * 10) / 10;
+                    if (t < 0.2) {
+                        readout.textContent = "scrub forward first — an out point at 0s would keep nothing";
+                        return;
+                    }
+                    cur.out = Math.max(t, (cur.in || 0) + 0.2);
+                    if (dur() && cur.out >= dur() - 0.05) cur.out = 0;
+                    paint(); commit();
+                });
+                wholeB.addEventListener("click", () => {
+                    cur.in = 0; cur.out = 0;
+                    paint(); commit();
+                });
+                paint();
+            }, () => {
+                vv.pause();
+                vv.removeAttribute("src");
+                vv.load();
+            });
+        }
+
         const stripHead = el("div", {
             ...sectionHeadStyle(), display: "flex", justifyContent: "space-between",
             gap: "16px", alignItems: "center",
@@ -3833,6 +4050,10 @@ function attachTimeline(node) {
             list.pop();
             reelSet(list);
             try {
+                // the popped clip is gone, so follow mode re-resolves to the one
+                // BEFORE it — a re-roll continues from the same source its
+                // predecessor did, which is exactly what a retake means
+                if (mcFollowOn()) mcApplyFollow();
                 run.armed = true;
                 run.mcSpan = mcSpanFrames();
                 await app.queuePrompt(0);
@@ -3959,78 +4180,24 @@ function attachTimeline(node) {
                 });
                 c.appendChild(vv);
 
-                // iOS-style trim strip: drag the green handles
-                const strip = el("div", {
-                    position: "relative", height: "14px", margin: "4px 6px 0",
-                    background: "#101010", borderRadius: "3px",
-                });
-                const keep = el("div", {
-                    position: "absolute", top: "0", bottom: "0",
-                    background: "rgba(158,228,147,0.25)", pointerEvents: "none",
-                });
-                const hL = el("div", {
-                    position: "absolute", top: "-2px", bottom: "-2px", width: "8px",
-                    background: COL.green, borderRadius: "2px", cursor: "ew-resize",
-                    touchAction: "none",
-                });
-                const hR = el("div", {
-                    position: "absolute", top: "-2px", bottom: "-2px", width: "8px",
-                    background: COL.green, borderRadius: "2px", cursor: "ew-resize",
-                    touchAction: "none",
-                });
-                strip.append(keep, hL, hR);
+                // trim summary — the actual trimming lives in a big popup view
                 const ro = el("div", {
-                    color: COL.text, fontSize: "10px", fontFamily: "monospace",
-                    padding: "1px 6px 0", textAlign: "center",
+                    color: COL.text, fontSize: "11px", fontFamily: "monospace",
+                    padding: "3px 6px 0", textAlign: "center", cursor: "pointer",
                 });
+                ro.title = "trim this clip in a big view (non-destructive — only applies at export)";
+                ro.addEventListener("click", () => openReelTrim(i));
                 const paintTrim = () => {
-                    if (!dur) { ro.textContent = "…"; return; }
-                    const a = (entry.in || 0) / dur;
-                    const b = endOf() / dur;
-                    keep.style.left = (a * 100) + "%";
-                    keep.style.width = (Math.max(0, b - a) * 100) + "%";
-                    hL.style.left = "calc(" + (a * 100) + "% - 4px)";
-                    hR.style.left = "calc(" + (b * 100) + "% - 4px)";
+                    if (!dur) { ro.textContent = "✂ trim…"; return; }
                     const trimmed = (entry.in || 0) > 0 || entry.out > 0;
-                    ro.textContent = (entry.in || 0).toFixed(1) + "–" + endOf().toFixed(1)
-                        + "s of " + dur.toFixed(1) + "s" + (trimmed ? " ✂" : "");
+                    ro.textContent = "✂ " + (entry.in || 0).toFixed(1) + "–" + endOf().toFixed(1)
+                        + "s of " + dur.toFixed(1) + "s";
                     ro.style.color = trimmed ? COL.green : COL.text;
                 };
                 vv.addEventListener("loadedmetadata", () => {
                     dur = isFinite(vv.duration) ? vv.duration : 0;
                     paintTrim();
                 });
-                const dragHandle = (handle, which) => {
-                    handle.addEventListener("pointerdown", (ev) => {
-                        ev.preventDefault();
-                        ev.stopPropagation();
-                        handle.setPointerCapture(ev.pointerId);
-                        const rect = strip.getBoundingClientRect();
-                        const move = (e2) => {
-                            if (!dur) return;
-                            let t = Math.min(Math.max((e2.clientX - rect.left) / rect.width, 0), 1) * dur;
-                            t = Math.round(t * 10) / 10;
-                            if (which === "in") {
-                                entry.in = Math.max(0, Math.min(t, endOf() - 0.2));
-                            } else {
-                                entry.out = Math.max(t, (entry.in || 0) + 0.2);
-                                if (entry.out >= dur - 0.05) entry.out = 0;   // snapped to end = untrimmed
-                            }
-                            paintTrim();
-                        };
-                        const up2 = () => {
-                            handle.removeEventListener("pointermove", move);
-                            handle.removeEventListener("pointerup", up2);
-                            const l = reelGet();
-                            l[i] = { ...l[i], in: entry.in || 0, out: entry.out || 0 };
-                            reelSet(l);
-                        };
-                        handle.addEventListener("pointermove", move);
-                        handle.addEventListener("pointerup", up2);
-                    });
-                };
-                dragHandle(hL, "in");
-                dragHandle(hR, "out");
 
                 const foot = el("div", { padding: "2px 6px 5px", display: "flex",
                     flexDirection: "column", gap: "3px" });
@@ -4063,9 +4230,6 @@ function attachTimeline(node) {
                     mk("⏭", "continue from this clip's OUT point (final kept frame → first frame)",
                         () => finalFrameToFirst(entry.name, entry.out > 0 ? entry.out : undefined),
                         COL.green),
-                    mk("⏭▶", "continue WITH MOTION from this clip's OUT point — its tail frames + audio are pinned at the next clip's head, so motion and sound carry through the join (costs extra rows; the pinned head is auto-trimmed)",
-                        () => continueWithMotion(entry.name, entry.out > 0 ? entry.out : undefined),
-                        COL.green),
                     mk("🎥", "add this clip as a reference video — its motion, look and sound condition the next render",
                         () => addFileVideo(entry.name), COL.green),
                     mk("✕", "remove from the chain (the file stays on disk)", () => {
@@ -4074,7 +4238,7 @@ function attachTimeline(node) {
                         reelSet(l);
                     }, COL.red));
                 foot.appendChild(row);
-                c.append(strip, ro, foot);
+                c.append(ro, foot);
                 reelRow.appendChild(c);
             });
         }
@@ -5198,17 +5362,35 @@ function attachTimeline(node) {
             }
             {
                 const mf = String(widgetValue(node, "motion_context_file", "")).trim();
-                mcLabel.textContent = mf ? mf.replace(/\s*\[\w+\]\s*$/, "")
-                    : "none — joins re-decide motion from a still";
-                mcLabel.style.color = mf ? COL.green : COL.text;
-                mcClear.style.display = mf ? "" : "none";
+                const follow = mcFollowOn();
+                const newest = reelGet().slice(-1)[0];
+                mcFollowB.style.color = follow ? COL.green : COL.bright;
+                mcFollowB.style.borderColor = follow ? COL.green : COL.border;
+                if (follow) {
+                    mcLabel.textContent = newest
+                        ? "follows the reel → " + newest.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop()
+                            + (newest.out > 0 ? ` (out ${newest.out.toFixed(1)}s)` : "")
+                        : "follows the reel — empty, queues run plain until a clip is added";
+                    mcLabel.style.color = newest ? COL.green : COL.mid;
+                } else {
+                    mcLabel.textContent = mf ? mf.replace(/\s*\[\w+\]\s*$/, "")
+                        : "off — joins re-decide motion from a still";
+                    mcLabel.style.color = mf ? COL.green : COL.text;
+                }
+                mcClear.style.display = (mf || follow) ? "" : "none";
                 const nF = Math.max(1, Number(widgetValue(node, "motion_context_frames", 22)) || 22);
                 if (document.activeElement !== mcFrames) mcFrames.value = String(nF);
                 if (document.activeElement !== mcAudio)
                     mcAudio.value = String(Math.max(0, Number(widgetValue(node, "motion_context_audio_frames", 22)) || 0));
                 if (document.activeElement !== mcEnd)
                     mcEnd.value = String(Number(widgetValue(node, "motion_context_end_seconds", 0)) || 0);
-                mcFrames.disabled = mcAudio.disabled = mcEnd.disabled = !mf;
+                mcFrames.disabled = mcAudio.disabled = !mf && !follow;
+                // in follow mode the cut point IS the reel card's out-trim —
+                // hand-editing it here would be overwritten at queue time
+                mcEnd.disabled = !mf || follow;
+                mcEnd.title = follow
+                    ? "follow mode: the cut point comes from the reel card's out-trim (✂ the card to change it)"
+                    : "continue from this moment of the context clip, in seconds (0 = its end)";
                 mcNote.style.display = mf ? "" : "none";
                 if (mf) {
                     const span = mcSpanFrames();

@@ -609,8 +609,10 @@ source is connected or named, with the file picker and the seconds range inline.
 
 Plain ⏭ chaining hands the next clip a still frame: pixel continuity, but the
 model re-decides instantaneous motion from a standing start, and reference
-audio is only ever *imitated* — a cover band, not the same recording. **⏭▶
-with motion** (on reel cards and the render dock) fixes both at once:
+audio is only ever *imitated* — a cover band, not the same recording. Turning
+on **⏭▶ continue the reel** (in the editor's MOTION bar) fixes both at once —
+from then on every ▶ queue continues from the **reel's newest clip, resolved
+at queue time**:
 
 - The previous clip's **tail frames** (default 22) are encoded in **one VAE
   call** and pinned at the new clip's head **on its own timeline** — one
@@ -626,15 +628,18 @@ with motion** (on reel cards and the render dock) fixes both at once:
 
 Practicalities:
 
+- The chaining loop is *render → 🎞 add to reel → queue again*. A trimmed
+  card is continued from its **OUT point**; **🎲 re-roll** continues from the
+  clip before the one it replaces (a retake, from the same source). **pick
+  clip…** continues from a specific file instead and turns the toggle off.
 - The render **opens by repeating the pinned tail** (~0.92 s at 22 frames).
   **🎞 add to reel** sets the new card's in-trim automatically, so an export
   never duplicates the join — non-destructive, adjust it on the card if you
   want.
-- The **⏭▶ MOTION bar** in the editor holds the dials: frames (snapped down to
-  the VAE's 5/22/39 run grid), audio frames (end-aligned with the video
-  window; 0 = picture only, needs `audio_vae` otherwise), and the source cut
-  point (⏭▶ on a trimmed card passes its OUT time). The pinned span shows
-  hatched at the head of the timeline.
+- The **⏭▶ MOTION bar** holds the dials: frames (snapped down to the VAE's
+  5/22/39 run grid) and audio frames (end-aligned with the video window; 0 =
+  picture only, needs `audio_vae` otherwise). The pinned span shows hatched
+  at the head of the timeline.
 - Under a context, `first_frame` is ignored (the context IS the opening),
   waypoints must sit past the pinned span, and the context rows are ground
   truth — full strength, untouched by the strength dials.
