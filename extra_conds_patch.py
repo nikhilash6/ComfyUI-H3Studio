@@ -85,6 +85,70 @@ def re_anchor_keyframes(layout, keyframes):
     return len(conds)
 
 
+# --- 1c. motion-context audio: ref rows moved onto the clip's timeline ------
+
+MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
+
+
+def relocate_context_audio(layout, refs):
+    """Translate the motion-context audio ref's time coordinates onto the target
+    timeline, so its window ENDS where the pinned video ends (the join).
+
+    Refs and keyframes carry identical row machinery; what makes the model read
+    a ref as "a separate clip to imitate" rather than "this clip, continued" is
+    purely that its coordinates sit in a span before the target. Moving them
+    turns a sound-alike into the same waveform, continued (measured join
+    correlation 0.45 -> 0.95+ in ComfyUI-H3-Motion-Context's seam probe, whose
+    finding this is).
+
+    Unlike their coordinate-range row selection, we select the marked ref's own
+    ref_audio SEGMENT (matched by audio-ref ordinal among the refs list, which
+    is the order segments are laid out in), so it coexists with any other
+    audio/video refs. Translation, not per-row assignment: += shift preserves
+    whatever intra-block structure core built. The ref still advances the
+    layout cursor, so its old slot is simply left vacant; the new window
+    [origin + FR*end - rt, origin + FR*end) always sits above the old slot's
+    start, so it can never collide with earlier refs' coordinate ranges.
+
+    Guards log-and-skip: a failed relocation degrades to stock ref placement
+    (imitation), never a broken render. Returns rows moved.
+    """
+    marked = [i for i, r in enumerate(refs) if r.get(MC_AUDIO_END_KEY) is not None]
+    if not marked:
+        return 0
+    if len(marked) > 1:
+        logging.warning("MiniMaxH3Guide: %d motion-context audio refs marked; expected "
+                        "one. Leaving all in stock ref placement.", len(marked))
+        return 0
+    mi = marked[0]
+    blk = refs[mi]
+    rt = int(blk.get("ref_audio_t", 0))
+    if blk.get("kind") != "audio" or rt <= 0:
+        logging.warning("MiniMaxH3Guide: motion-context audio marker on a %r ref with "
+                        "%d steps; skipping relocation.", blk.get("kind"), rt)
+        return 0
+    origin = _video_time_origin(layout)
+    if origin is None:
+        logging.warning("MiniMaxH3Guide: no video segment in the layout; motion-context "
+                        "audio left in ref placement.")
+        return 0
+    # each audio-bearing ref emits exactly one ref_audio segment, in refs order
+    ordinal = sum(1 for r in refs[:mi] if int(r.get("ref_audio_t", 0) or 0) > 0
+                  and r.get("kind") in ("audio", "video", "video_audio"))
+    audio_segs = [(a, b) for a, b, kind in layout.segments if kind == "ref_audio"]
+    if ordinal >= len(audio_segs):
+        logging.warning("MiniMaxH3Guide: motion-context audio segment not found "
+                        "(ordinal %d of %d ref_audio segments); left in ref placement.",
+                        ordinal, len(audio_segs))
+        return 0
+    a, b = audio_segs[ordinal]
+    end_frame = float(blk[MC_AUDIO_END_KEY])
+    t0 = float(layout.position_ids[a:b, 0].min())
+    shift = (origin + _mmm.FRAME_RESCALE * end_frame - rt) - t0
+    layout.position_ids[a:b, 0] += shift
+    return b - a
+
+
 # --- 2. timed text ---------------------------------------------------------
 
 def apply_text_beats(layout, beats):
@@ -154,6 +218,9 @@ def _patched_extra_conds(self, **kwargs):
     keyframes = payload.get("keyframes")
     if layout0 is not None and keyframes:
         re_anchor_keyframes(layout0, keyframes)
+    all_refs = payload.get("refs") or []
+    if layout0 is not None and all_refs:
+        relocate_context_audio(layout0, all_refs)
 
     beats = kwargs.get("minimax_text_beats")
     if beats:

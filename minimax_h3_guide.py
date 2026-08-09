@@ -130,6 +130,34 @@ REF_VIDEO_MAX_SECONDS = 15  # core's stated trained range for reference videos
 CANVAS_MULTIPLE = 32
 REF_IMAGE_SHORT_EDGE = 2048
 
+# Motion context: the previous clip's tail pinned at the new clip's head, so
+# instantaneous motion (velocity, direction) and the actual audio waveform
+# continue through a join instead of being re-decided / imitated. Technique
+# absorbed from ComfyUI-H3-Motion-Context (see README credit); Peter
+# render-verified their approach before we adopted it natively.
+MC_FRAME_PER_TOKEN = (1, 4, 4, 4, 4)  # pixel frames covered by latent step k%5
+MC_VIDEO_RUN_GRID = (39, 22, 5, 1)    # run lengths the video VAE distinguishes
+MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
+
+
+def mc_step_offsets(latent_t):
+    """Pixel-frame index at which each latent step of a video run begins.
+
+    The exclusive cumulative sum of MC_FRAME_PER_TOKEN: [0, 1, 5, 9, 13, 17, 18, ...].
+    Each step becomes one keyframe anchored at exactly this offset, so the pinned
+    content and its RoPE time coordinate agree.
+    """
+    out, acc = [], 0
+    for k in range(latent_t):
+        out.append(acc)
+        acc += MC_FRAME_PER_TOKEN[k % 5]
+    return out
+
+
+def mc_pixel_frames(latent_t):
+    """Pixel frames covered by latent_t latent steps of a video run."""
+    return sum(MC_FRAME_PER_TOKEN[k % 5] for k in range(latent_t))
+
 
 def parse_ref_spec(spec, count, field="ref_spec"):
     """Parse a strength spec: one 'strength' per reference, or empty for 1.0."""
@@ -663,6 +691,14 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="The v2v restyle amount, as a VALUE THIS NODE EMITS (third output): wire it to H3 Basic Scheduler's denoise input -> SamplerCustom/sigmas, and the editor's v2v bar controls the whole restyle. Has no effect on this node's own outputs otherwise; with a plain KSampler just set its denoise to match. ~0.3 barely touches the footage, 0.4-0.7 restyles keeping motion, 1.0 ignores it."),
                 io.String.Input("v2v_crop", default="",
                     tooltip="Optional framing for the v2v source: 'center_x, center_y, zoom' (the editor's v2v ⛶ writes this). The window is locked to the width x height widgets' aspect and the footage is resized to exactly that canvas -- so WITH a framing, width/height matter again (reframe landscape footage into a vertical clip, etc.). Without one, the canvas follows the footage and width/height are ignored."),
+                io.String.Input("motion_context_file", default="",
+                    tooltip="Continue WITH MOTION from this video (input/output folder; 'name [output]' chains from a previous render -- the editor's ⏭▶ writes this). Its tail frames are pinned at the head of the new clip ON ITS OWN TIMELINE, so instantaneous motion carries through the join instead of being re-decided from a still, and the tail audio is continued as the same waveform rather than imitated. The pinned frames come back at the start of the render; the editor trims them automatically when the clip joins the reel. When set, first_frame is ignored (the context IS the opening). Technique credit: ComfyUI-H3-Motion-Context."),
+                io.Float.Input("motion_context_end_seconds", default=0.0, min=0.0, max=10000.0, step=0.1,
+                    tooltip="Continue from this moment of the context video, in seconds (0 = its end). The reel's ⏭▶ passes the card's out-trim, so the join lands exactly at the cut."),
+                io.Int.Input("motion_context_frames", default=22, min=1, max=39,
+                    tooltip="How many tail frames to pin. The video VAE only distinguishes runs of 5, 22 and 39 -- anything else snaps DOWN to the nearest. 22 (default) is nearly seamless; 5 is just barely fluid but much cheaper; 39 is untested. Every pinned row rides through all sampling steps, so this is also a speed dial."),
+                io.Int.Input("motion_context_audio_frames", default=22, min=0, max=240,
+                    tooltip="Tail AUDIO to pin, in frames at 24 fps, END-ALIGNED with the pinned video so both finish at the join -- the model continues the actual waveform (same recording) instead of playing a sound-alike. 0 = no audio context. Needs audio_vae when above 0 and the context video has sound. 22 overlays the video window exactly (the tested configuration)."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -700,6 +736,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             names += file_lines(kwargs.get(field, ""))
         if (kwargs.get("v2v_video_file") or "").strip():
             names.append(kwargs["v2v_video_file"].strip())
+        if (kwargs.get("motion_context_file") or "").strip():
+            names.append(kwargs["motion_context_file"].strip())
         parts = []
         for n in names:
             try:
@@ -762,6 +800,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 ref_video_crops="",
                 v2v_video_file="", v2v_start_seconds=0.0, v2v_end_seconds=0.0,
                 v2v_crop="", v2v_denoise=0.55,
+                motion_context_file="", motion_context_end_seconds=0.0,
+                motion_context_frames=22, motion_context_audio_frames=22,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -905,9 +945,128 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             raise RuntimeError("MiniMax H3 Guide: middle keyframes need the PackedLayout "
                                "extension, which could not be installed. See the log.")
 
+        # -- motion context: pin the previous clip's tail at this clip's head --
+        # One VAE call on a grid-snapped run of tail frames; each latent step of
+        # the encoded run becomes a full-strength keyframe at its exact pixel
+        # offset (the exclusive cumsum of the (1,4,4,4,4) token pattern), so the
+        # motion between the frames lives INSIDE the pinned latents. Context
+        # rows are ground truth -- strength 1.0, no noise_aug, untouched by the
+        # sub-1.0 label machinery.
+        mc_file = (motion_context_file or "").strip()
+        mc_keyframes, mc_span, mc_audio_block = [], 0, None
+        if mc_file:
+            if not middle_frame_patch.install():
+                raise RuntimeError(
+                    "MiniMax H3 Guide: motion context needs the PackedLayout extension, "
+                    "which could not be installed. See the log. Plain ⏭ continuation "
+                    "(final frame -> first frame) still works.")
+            if v2v_frames is not None:
+                logging.warning(
+                    "MiniMaxH3Guide: motion context AND a v2v source are both set -- the "
+                    "pinned head frames will fight the footage being restyled over the "
+                    "same opening. This combination is untested; expect odd joins.")
+            mc_frames, mc_snd = load_input_video(mc_file, "motion_context_file",
+                                                 max_seconds=None)
+            total_mc = mc_frames.shape[0]
+            cut = total_mc
+            if motion_context_end_seconds > 0:
+                cut = max(1, min(total_mc,
+                                 int(round(motion_context_end_seconds * FPS_HINT))))
+                if cut < total_mc:
+                    logging.info("MiniMaxH3Guide: motion context continues from %.2fs "
+                                 "(frame %d of %d) of %r.",
+                                 motion_context_end_seconds, cut, total_mc, mc_file)
+            n = max(1, min(int(motion_context_frames), cut))
+            run = next(g for g in MC_VIDEO_RUN_GRID if g <= n)
+            if run != n:
+                logging.info("MiniMaxH3Guide: motion context %d frames is off the video "
+                             "VAE's run grid -- pinning the last %d instead (usable "
+                             "runs: 1, 5, 22, 39).", n, run)
+            if run >= frame_count:
+                raise ValueError(
+                    "MiniMax H3 Guide: motion context of %d frames into a %d-frame clip "
+                    "-- the pinned run must be a small fraction of the timeline. "
+                    "Lengthen the clip or lower motion_context_frames." % (run, frame_count))
+            # snap BEFORE slicing: encoding an off-grid count would make the VAE
+            # keep the FIRST covered frames of the slice, ending the pinned run
+            # early and shifting the join by the difference
+            tail = _resize(mc_frames[cut - run:cut], width, height, "disabled")
+            enc = vae.encode(tail)
+            steps = int(enc.shape[2])
+            if mc_pixel_frames(steps) != run:
+                raise RuntimeError(
+                    "MiniMax H3 Guide: %d context frames encoded to %d latent steps "
+                    "covering %d -- the video VAE's downscale grid changed upstream. "
+                    "Refusing to render a shifted join." % (run, steps, mc_pixel_frames(steps)))
+            offsets = mc_step_offsets(steps)
+            mc_keyframes = [{"resolved_frame_index": offsets[k],
+                             "latent": enc[:, :, k:k + 1]} for k in range(steps)]
+            mc_span = run
+
+            # audio context: the tail waveform ending at the SAME instant as the
+            # pinned video, so both finish at the join. It rides the reference
+            # machinery for construction; extra_conds_patch relocates its time
+            # coordinates onto this clip's own timeline (ending at frame
+            # mc_span), which is what turns imitation into continuation.
+            a_frames = int(motion_context_audio_frames)
+            if a_frames > 0:
+                if mc_snd is None or mc_snd.get("waveform") is None:
+                    logging.info("MiniMaxH3Guide: motion context source %r has no "
+                                 "soundtrack -- audio context skipped.", mc_file)
+                elif audio_vae is None:
+                    raise ValueError(
+                        "MiniMax H3 Guide: motion context audio needs audio_vae -- wire "
+                        "the MiniMax H3 audio VAE in, or set motion_context_audio_frames "
+                        "to 0 to continue picture only.")
+                else:
+                    sr = mc_snd["sample_rate"]
+                    a_end = int(round(cut / FPS_HINT * sr))
+                    want = int(round(a_frames / FPS_HINT * sr))
+                    wf = mc_snd["waveform"][..., max(0, a_end - want):a_end]
+                    if wf.shape[-1] <= 0:
+                        logging.warning("MiniMaxH3Guide: motion context audio window is "
+                                        "empty at the cut point -- audio context skipped.")
+                    else:
+                        if wf.shape[-1] < want:
+                            logging.warning(
+                                "MiniMaxH3Guide: motion context audio is %.2fs, shorter "
+                                "than the %.2fs window -- pinning what there is.",
+                                wf.shape[-1] / sr, want / sr)
+                        z_a, rt_a = encode_ref_audio(
+                            audio_vae, {"waveform": wf, "sample_rate": sr})
+                        if rt_a > 0:
+                            mc_audio_block = {"kind": "audio", "ref_audio_t": rt_a,
+                                              "audio_latent": z_a,
+                                              MC_AUDIO_END_KEY: float(mc_span)}
+
+            if first_frame is not None or first_frame_file.strip():
+                logging.info("MiniMaxH3Guide: motion context occupies frames 0-%d -- "
+                             "first_frame is ignored (the context IS the opening).",
+                             mc_span - 1)
+                first_frame = None
+            bad_wp = [e for e in spec if e["index"] < mc_span]
+            if bad_wp:
+                raise ValueError(
+                    "MiniMax H3 Guide: a middle frame at frame %d sits inside the "
+                    "%d-frame motion-context head (frames 0-%d are pinned). Move it "
+                    "past %.2fs or shorten the context."
+                    % (bad_wp[0]["index"], mc_span, mc_span - 1, mc_span / FPS_HINT))
+            logging.info("MiniMaxH3Guide: motion context -- %d frames of %r pinned at "
+                         "the head as %d cond block(s) at indices %s, audio %s. The "
+                         "first %.2fs of the render repeats the source tail; the editor "
+                         "trims it on the reel.",
+                         run, mc_file, len(mc_keyframes),
+                         "%d..%d" % (offsets[0], offsets[-1]),
+                         ("%d latent steps ending at the join" % mc_audio_block["ref_audio_t"])
+                         if mc_audio_block else "off",
+                         mc_span / FPS_HINT)
+
         # Ordered along the timeline so <Picture N> labels read in temporal order.
+        # Motion-context blocks come first (they occupy the head) and carry their
+        # final latents already -- no image, so they never enter the tokenizer's
+        # picture list or the strength/encode loop below.
         images = []
-        keyframes = []
+        keyframes = list(mc_keyframes)
 
         def add(img, index, strength, seed):
             images.append(img)
@@ -1059,7 +1218,19 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             ref_items.append({"type": "audio"})
             ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t,
                                "audio_latent": z})
-        if ref_audio_list or n_soundtracks:
+        if mc_audio_block is not None:
+            # Always the LAST ref block, and deliberately item-less: the tokenizer
+            # never numbers it, so <Audio N> labels stay stable whether or not a
+            # context is set. Its rows reach the DiT; extra_conds_patch moves
+            # their time coordinates onto the clip's own timeline. It is also
+            # excluded from ref_audio_strength -- context is ground truth.
+            ref_blocks.append(mc_audio_block)
+            if not extra_conds_patch.install():
+                raise RuntimeError(
+                    "MiniMax H3 Guide: motion-context audio needs the extra_conds "
+                    "patch, which could not be installed. See the log; set "
+                    "motion_context_audio_frames to 0 to continue picture only.")
+        if ref_audio_list or n_soundtracks or mc_audio_block is not None:
             # Retry in case the turbo pack loaded after this one. Its adaln row table
             # ignores audio conditioning and dies with a shape mismatch otherwise.
             if not turbo_compat.install() and turbo_compat.turbo_present():
@@ -1135,6 +1306,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
 
         if keyframes:
             for kf in keyframes:
+                if "image" not in kf:
+                    continue  # motion-context block: latent already final
                 z = vae.encode(kf.pop("image"))
                 s = kf.pop("strength")
                 seed = kf.pop("noise_seed")
