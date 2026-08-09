@@ -4175,12 +4175,26 @@ function attachTimeline(node) {
             const gMus = node.properties?.h3_guide || {};
             const musicFrom = gMus.follow ? 0 : (Number(gMus.offset) || 0);
             let music = null, reelClock = 0;
+            let musicBase = Math.min(1, Number(gMus.level) || 0);
             if (gMus.name) {
                 music = document.createElement("audio");
                 music.preload = "auto";
                 music.src = inputFileUrl(gMus.name);
-                music.volume = Math.min(1, Number(gMus.level) || 0);
+                music.volume = musicBase;
             }
+            const reelTotal = () => {
+                // whole-reel kept duration, for previewing the music fade-out
+                let tot = 0;
+                for (const e of list) {
+                    if (e.out > 0) tot += Math.max(0, e.out - (e.in || 0));
+                    else {
+                        const d = state.videoMeta.get(e.name)?.dur;
+                        if (!d) { ensureVideoMeta(e.name); return null; }
+                        tot += Math.max(0, d - (e.in || 0));
+                    }
+                }
+                return tot;
+            };
             const syncMusic = (withinClip) => {
                 if (!music) return;
                 music.currentTime = musicFrom + reelClock + (withinClip || 0);
@@ -4230,6 +4244,21 @@ function attachTimeline(node) {
                 const tick = () => {
                     if (stopped) return;
                     const v = vids[act], e = entry(idx);
+                    // preview the music's own fades: same maths as the export
+                    if (music && !music.paused) {
+                        const fi = Number(gMus.musicFadeIn) || 0;
+                        const fo = Number(gMus.musicFadeOut) || 0;
+                        if (fi > 0 || fo > 0) {
+                            const elapsed = reelClock + Math.max(0, v.currentTime - (e.in || 0));
+                            const tot = reelTotal();
+                            let ramp = 1;
+                            if (fi > 0) ramp = Math.min(ramp, elapsed / fi);
+                            if (fo > 0 && tot != null) ramp = Math.min(ramp, (tot - elapsed) / fo);
+                            music.volume = musicBase * Math.min(1, Math.max(0, ramp));
+                        } else if (music.volume !== musicBase) {
+                            music.volume = musicBase;
+                        }
+                    }
                     const d = isFinite(v.duration) ? v.duration : 0;
                     const out = e.out > 0 ? Math.min(e.out, d || e.out) : d;
                     if (d && out && v.currentTime >= out - 0.03) { advance(); return; }
@@ -4314,7 +4343,8 @@ function attachTimeline(node) {
                         mVal.textContent = v + "%";
                         node.properties = node.properties || {};
                         node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v / 100 };
-                        music.volume = Math.min(1, v / 100);
+                        musicBase = Math.min(1, v / 100);
+                        music.volume = musicBase;   // tick reapplies fade ramps
                         state.fs?.fill?.();   // keep the reel header field in step
                     });
                     mWrap.append(mSl, mVal);
@@ -4746,7 +4776,9 @@ function attachTimeline(node) {
                         fps: FPS,
                         music: g2.name && (Number(g2.level) || 0) > 0
                             ? { name: g2.name, level: Number(g2.level),
-                                from: g2.follow ? 0 : (Number(g2.offset) || 0) }
+                                from: g2.follow ? 0 : (Number(g2.offset) || 0),
+                                fade_in: Number(g2.musicFadeIn) || 0,
+                                fade_out: Number(g2.musicFadeOut) || 0 }
                             : null,
                     }),
                 });
@@ -4800,10 +4832,33 @@ function attachTimeline(node) {
             node.properties = node.properties || {};
             node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v / 100 };
         });
+        // bed-only fades: the reel usually sits mid-song — ease the music in
+        // and out on its own, independent of the whole-reel fades
+        const mkMusicFade = (key, label) => {
+            const f = el("input");
+            Object.assign(f.style, {
+                width: "36px", background: COL.input, color: COL.bright,
+                border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
+                padding: "2px 4px", fontFamily: "monospace", textAlign: "center",
+                display: "none",
+            });
+            f.title = `music ${label}, in seconds — eases just the bed (a reel that starts or ends mid-song sounds abrupt otherwise). Separate from the whole-reel fades.`;
+            f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
+            f.addEventListener("blur", () => {
+                const v = Math.max(0, Math.min(15, parseFloat(f.value) || 0));
+                f.value = String(v);
+                node.properties = node.properties || {};
+                node.properties.h3_guide = { ...(node.properties.h3_guide || {}), [key]: v };
+            });
+            return f;
+        };
+        const musicFiF = mkMusicFade("musicFadeIn", "fade in");
+        const musicFoF = mkMusicFade("musicFadeOut", "fade out");
+        const musicFadeLab = el("span", { color: COL.text, fontSize: "11px", display: "none" }, "♪fade");
         const playReelB = el("button", { ...btnStyle, color: COL.green }, "▶ play reel");
         playReelB.title = "preview the chain as it stands, without exporting — trims respected, joins as hard cuts (crossfades, fades and luma-match only apply at export)";
         playReelB.addEventListener("click", () => openReelPlayer());
-        reelCtl.append(undoB, playReelB, musicLab, musicF,
+        reelCtl.append(undoB, playReelB, musicLab, musicF, musicFadeLab, musicFiF, musicFoF,
             el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
             reelAddB, rerollB, exportB);
@@ -6176,8 +6231,17 @@ function attachTimeline(node) {
                     elx.style.display = on ? "" : "none";
                 musicLab.style.display = on ? "" : "none";
                 musicF.style.display = on ? "" : "none";
+                const mixOn = on && (Number(g.level) || 0) > 0;
+                for (const elx of [musicFadeLab, musicFiF, musicFoF])
+                    elx.style.display = mixOn ? "" : "none";
                 if (on && document.activeElement !== musicF)
                     musicF.value = String(Math.round((Number(g.level) || 0) * 100));
+                if (mixOn) {
+                    if (document.activeElement !== musicFiF)
+                        musicFiF.value = String(Number(g.musicFadeIn) || 0);
+                    if (document.activeElement !== musicFoF)
+                        musicFoF.value = String(Number(g.musicFadeOut) || 0);
+                }
                 if (on) {
                     guideOff.disabled = !!g.follow;
                     if (document.activeElement !== guideOff) {

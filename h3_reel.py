@@ -219,9 +219,22 @@ def register():
                 start = max(0.0, float(music.get("from") or 0.0))
                 bed_wf = _clip_audio(bed, int(round(start * fps)), out_f.shape[0],
                                      fps, sr, channels)
+                # bed-only fades: the reel usually sits mid-song, so the music
+                # needs its own ease in/out independent of the whole-reel fades
+                m_fi = max(0.0, min(15.0, float(music.get("fade_in") or 0.0)))
+                m_fo = max(0.0, min(15.0, float(music.get("fade_out") or 0.0)))
+                if m_fi > 0:
+                    s = min(int(round(m_fi * sr)), bed_wf.shape[-1])
+                    if s > 1:
+                        bed_wf[..., :s] *= torch.linspace(0.0, 1.0, s)
+                if m_fo > 0:
+                    s = min(int(round(m_fo * sr)), bed_wf.shape[-1])
+                    if s > 1:
+                        bed_wf[..., -s:] *= torch.linspace(1.0, 0.0, s)
                 out_a = out_a + bed_wf * lvl
                 logging.info("MiniMaxH3Guide: reel music bed mixed — %r at %.0f%% "
-                             "from %.1fs", music["name"], lvl * 100, start)
+                             "from %.1fs (music fades %.1fs/%.1fs)",
+                             music["name"], lvl * 100, start, m_fi, m_fo)
             except Exception:
                 logging.exception("MiniMaxH3Guide: music bed failed — exporting without it")
 
