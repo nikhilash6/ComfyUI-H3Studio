@@ -87,8 +87,10 @@ class H3SoftDenoiseZone(io.ComfyNode):
                     tooltip="Fraction of the sampler's denoise outside the zone. 0 = the surroundings reproduce the footage untouched."),
                 io.Int.Input("noise_seed", default=77, min=0, max=2**31 - 1,
                     tooltip="Seed for the re-injection noise field (deterministic; change it only to reroll how protected regions shimmer)."),
+                io.Float.Input("mask_feather", default=0.1, min=0.0, max=0.5, step=0.01,
+                    tooltip="Softens a MASK input (radius as a fraction of the frame's short side): the mask is grown then blurred, so a hard segmentation matte (SAM2 etc.) fades outward instead of leaving a matte line. 0 = use the mask as-is. Ignored for the circle (it has its own feather)."),
                 io.Mask.Input("mask", optional=True,
-                    tooltip="Optional: replaces the circle. White areas get inner_denoise, black get outer_denoise, greys blend — feather your mask, hard edges show."),
+                    tooltip="Optional: replaces the circle. White areas get inner_denoise, black get outer_denoise, greys blend. A SINGLE mask applies to the whole clip; a mask BATCH (one per frame at 24 fps — e.g. SAM2 video segmentation tracking a person) follows the subject through time, pooled onto the latent grid. Frame counts that don't match the clip are resampled by index."),
             ],
             outputs=[io.Model.Output(
                 tooltip="Wire to the sampler in place of the plain model.")],
@@ -97,7 +99,7 @@ class H3SoftDenoiseZone(io.ComfyNode):
     @classmethod
     def execute(cls, model, v2v_latent, center_x=0.5, center_y=0.5, radius=0.35,
                 feather=0.5, inner_denoise=1.0, outer_denoise=0.3,
-                noise_seed=77, mask=None) -> io.NodeOutput:
+                noise_seed=77, mask_feather=0.1, mask=None) -> io.NodeOutput:
         samples = v2v_latent["samples"]
         parts = list(samples.unbind()) if hasattr(samples, "unbind") else [samples]
         video = parts[0]
@@ -117,15 +119,58 @@ class H3SoftDenoiseZone(io.ComfyNode):
 
         if mask is not None:
             m3 = mask if mask.ndim == 3 else mask[None]
+            m3 = m3.to(torch.float32).clamp(0.0, 1.0)
+            t_lat = int(video.shape[2])
+            if m3.shape[0] > 1 and t_lat > 1:
+                # PER-FRAME mask (e.g. SAM2 video segmentation): pool each
+                # latent step's group of pixel frames — H3's latent time axis
+                # covers (1,4,4,4,4) pixel frames per step, the same grid the
+                # motion-context maths uses. Averaging the group also gives
+                # motion a naturally soft temporal edge.
+                from .minimax_h3_guide import mc_pixel_frames, mc_step_offsets
+                pixel_frames = mc_pixel_frames(t_lat)
+                offsets = mc_step_offsets(t_lat)
+                b0 = m3.shape[0]
+                if b0 != pixel_frames:
+                    logging.info("H3SoftDenoiseZone: %d mask frames onto a %d-frame "
+                                 "clip — resampling by index.", b0, pixel_frames)
+                idx = [min(b0 - 1, round(p * (b0 - 1) / max(1, pixel_frames - 1)))
+                       for p in range(pixel_frames)]
+                per_step = []
+                for k in range(t_lat):
+                    n_k = mc_pixel_frames(k + 1) - offsets[k]
+                    grp = m3[[idx[p] for p in
+                              range(offsets[k], min(offsets[k] + n_k, pixel_frames))]]
+                    per_step.append(grp.mean(dim=0))
+                v = torch.stack(per_step)               # [T, H, W]
+            else:
+                v = m3[0:1]                             # [1, H, W] — whole clip
             v = torch.nn.functional.interpolate(
-                m3[:1].unsqueeze(1).to(torch.float32), size=(h, w),
-                mode="bilinear", align_corners=False)[0, 0].clamp(0.0, 1.0)
+                v.unsqueeze(1), size=(h, w), mode="bilinear",
+                align_corners=False)[:, 0]
+            # feather: grow then blur, so a hard segmentation matte fades
+            # OUTWARD past the subject instead of leaving a matte line. The
+            # original mask is re-maximized in at the end: the subject's
+            # interior keeps FULL strength, only the falloff is added.
+            r = int(round(float(mask_feather) * min(h, w)))
+            if r > 0:
+                k2 = 2 * r + 1
+                v4 = v.unsqueeze(1)
+                v4 = torch.nn.functional.max_pool2d(v4, kernel_size=k2,
+                                                    stride=1, padding=r)
+                for _ in range(3):   # triple box blur ~ gaussian
+                    v4 = torch.nn.functional.avg_pool2d(
+                        v4, kernel_size=k2, stride=1, padding=r,
+                        count_include_pad=False)
+                v = torch.maximum(v4[:, 0], v)
+            v = v.clamp(0.0, 1.0)
         else:
             v = radial_map(h, w, float(center_x), float(center_y),
-                           float(radius), float(feather))
+                           float(radius), float(feather)).unsqueeze(0)
         zone = (float(outer_denoise)
                 + (float(inner_denoise) - float(outer_denoise)) * v)
-        map5 = zone.view(1, 1, 1, h, w).to(torch.float32)
+        # [1,1,Tm,h,w] with Tm = 1 (static/circle) or the latent T (per-frame)
+        map5 = zone.unsqueeze(0).unsqueeze(0).to(torch.float32)
 
         # footage in sampling space (H3's latent format is scale 1.0 today, but
         # go through the proper door) + a fixed re-injection noise field

@@ -596,6 +596,14 @@ the sampler's own denoise*, which stays the master dial. The classic ask —
 "reinvent the subject in the centre, barely touch the environment" — is
 `inner 1.0 / outer 0.3` with a wide feather.
 
+The mask input accepts a **per-frame batch** as well as a single mask: feed
+SAM2 video segmentation (or any per-frame matte) and the zone follows the
+subject through time — each latent step pools its group of pixel frames
+(H3's (1,4,4,4,4) time grid), which also softens motion temporally.
+`mask_feather` grows-then-blurs hard mattes so the falloff extends outward
+while the subject's interior keeps full strength; mask frame counts that
+don't match the clip are resampled by index.
+
 Mechanically this is Differential Diffusion (the same idea core ComfyUI ships
 for image models): the soft map is thresholded against sampling progress every
 step, and not-yet-participating pixels are re-injected from the clean footage
