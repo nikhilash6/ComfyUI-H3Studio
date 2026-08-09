@@ -2489,9 +2489,11 @@ function attachTimeline(node) {
         const qText = el("span", { color: COL.text, fontSize: "11px", whiteSpace: "nowrap" }, "");
         qWrap.append(qBar, qText);
 
+        const dockSize = node.properties?.h3_dock || {};
         const resPanel = el("div", {
             position: "absolute", right: "18px", bottom: "54px", zIndex: "5",
-            width: "324px", background: COL.panel, border: `1px solid ${COL.border}`,
+            width: (dockSize.w || 520) + "px", background: COL.panel,
+            border: `1px solid ${COL.border}`,
             borderRadius: "8px", overflow: "hidden", display: "none",
             boxShadow: "0 10px 36px rgba(0,0,0,0.65)",
         });
@@ -2499,6 +2501,30 @@ function attachTimeline(node) {
             display: "flex", alignItems: "center", gap: "8px",
             padding: "6px 10px", borderBottom: `1px solid ${COL.divider}`,
         });
+        const resGrip = el("span", { cursor: "nwse-resize", color: COL.text,
+            fontSize: "12px", userSelect: "none" }, "⤡");
+        resGrip.title = "drag to resize";
+        resGrip.addEventListener("pointerdown", (ev) => {
+            ev.preventDefault();
+            resGrip.setPointerCapture(ev.pointerId);
+            const w0 = resPanel.getBoundingClientRect().width;
+            const x0 = ev.clientX;
+            const move = (e2) => {
+                // anchored right: dragging LEFT grows the panel
+                const w = Math.min(window.innerWidth - 60,
+                    Math.max(280, w0 + (x0 - e2.clientX)));
+                resPanel.style.width = w + "px";
+            };
+            const up = (e2) => {
+                resGrip.removeEventListener("pointermove", move);
+                resGrip.removeEventListener("pointerup", up);
+                node.properties = node.properties || {};
+                node.properties.h3_dock = { w: Math.round(resPanel.getBoundingClientRect().width) };
+            };
+            resGrip.addEventListener("pointermove", move);
+            resGrip.addEventListener("pointerup", up);
+        });
+        resHead.appendChild(resGrip);
         const resTitle = el("span", { color: COL.bright, fontSize: "12px", flex: "1" }, "");
         const resClose = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "✕");
         resClose.addEventListener("click", () => { resPanel.style.display = "none"; });
@@ -2547,7 +2573,14 @@ function attachTimeline(node) {
                 const refB = el("button", { ...btnStyle, fontSize: "11px" }, "+ as video ref");
                 refB.title = "carry this clip's motion and sound into the next one as a reference video";
                 refB.addEventListener("click", () => addFileVideo(name));
-                resFoot.append(chainB, refB);
+                const reelB = el("button", { ...btnStyle, fontSize: "11px" }, "🎞 add to reel");
+                reelB.title = "append this clip to the chain at the bottom";
+                reelB.addEventListener("click", () => {
+                    reelAdd(name);
+                    reelB.textContent = "✓ in reel";
+                    reelB.disabled = true;
+                });
+                resFoot.append(chainB, refB, reelB);
             } else {
                 const useB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
                     "use as first frame");
@@ -2614,10 +2647,7 @@ function attachTimeline(node) {
         const onExecuted = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
             const got = pickOutput(detail?.output);
-            if (got) {
-                showResult(got.name, got.video);
-                if (got.video && reelGet().length) reelAdd(got.name);
-            }
+            if (got) showResult(got.name, got.video);
         };
         const onDone = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
