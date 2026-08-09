@@ -3672,6 +3672,8 @@ function attachTimeline(node) {
                     }),
                     mk("⏭", "continue from this clip (final frame → first frame)",
                         () => finalFrameToFirst(name), COL.green),
+                    mk("🎥", "add this clip as a reference video — its motion, look and sound condition the next render",
+                        () => addFileVideo(name), COL.green),
                     mk("✕", "remove from the chain (the file stays on disk)", () => {
                         const l = reelGet();
                         l.splice(i, 1);
