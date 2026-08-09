@@ -329,7 +329,7 @@ const SETUP_FIELDS = [
     "ref_spec", "ref_image_size", "ref_megapixels", "ref_audio_strength",
     "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_megapixels",
     "ref_video_crops", "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds",
-    "v2v_crop",
+    "v2v_crop", "v2v_denoise",
     "mask_ref_pixels",
 ];
 
@@ -344,7 +344,7 @@ const SETUP_DEFAULTS = {
     ref_spec: "", ref_image_size: "match", ref_megapixels: 0.0, ref_audio_strength: 1.0,
     ref_audio_files: "", ref_video_spec: "", ref_video_files: "", ref_video_megapixels: 0.0,
     ref_video_crops: "", v2v_video_file: "", v2v_start_seconds: 0.0, v2v_end_seconds: 0.0,
-    v2v_crop: "",
+    v2v_crop: "", v2v_denoise: 0.55,
     mask_ref_pixels: false,
 };
 
@@ -2794,15 +2794,29 @@ function attachTimeline(node) {
         });
         ghostSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
         ghostWrap.appendChild(ghostSl);
+        const dnWrap = el("span", { display: "none", alignItems: "center", gap: "5px" });
+        dnWrap.appendChild(el("span", { color: COL.text, fontSize: "11px" }, "denoise"));
+        const dnSl = el("input");
+        dnSl.type = "range"; dnSl.min = "0.05"; dnSl.max = "1"; dnSl.step = "0.05";
+        Object.assign(dnSl.style, { width: "80px", accentColor: COL.mid, cursor: "pointer" });
+        const dnVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" }, "0.55");
+        dnSl.title = "restyle amount — flows out of the node's v2v_denoise output: wire it to 'H3 Basic Scheduler (wired denoise)' → your sampler's sigmas and this slider drives the render. ~0.3 barely touches the footage, 0.4–0.7 restyles keeping motion, 1.0 ignores it.";
+        dnSl.addEventListener("input", () => {
+            const v = Math.round(parseFloat(dnSl.value) * 20) / 20;
+            setWidget("v2v_denoise", v);
+            dnVal.textContent = v.toFixed(2);
+        });
+        dnSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        dnWrap.append(dnSl, dnVal);
         const v2vDenoise = el("span", {
             color: COL.mid, fontSize: "12px", display: "none", whiteSpace: "nowrap",
-        }, "→ set denoise 0.3–0.7 on your KSampler");
-        v2vDenoise.title = "the restyle amount lives on the SAMPLER, not this node: denoise 1.0 ignores the footage entirely, ~0.3 barely touches it, 0.4–0.7 restyles while keeping the motion";
+        }, "→ wire v2v_denoise → H3 Basic Scheduler");
+        v2vDenoise.title = "this slider only reaches the render through the wire: node's v2v_denoise output → H3 Basic Scheduler (wired denoise) → SamplerCustom sigmas. With a plain KSampler, set its denoise to match by hand.";
         v2vBar.append(v2vLabel, v2vNote,
             el("span", { color: COL.text, fontSize: "11px" }, "section"),
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            v2vScrub, v2vFrame, ghostWrap, v2vPick, v2vClear, v2vDenoise);
+            v2vScrub, v2vFrame, ghostWrap, dnWrap, v2vPick, v2vClear, v2vDenoise);
 
         // ---- motion path: Ken Burns through the model -----------------------
         // Two windows (A=start, B=end) over one image; the chosen curve places
@@ -4553,6 +4567,12 @@ function attachTimeline(node) {
                 v2vFrame.style.display = ((!vSock && vf) || (vSock && v2vCrop)) ? "" : "none";
                 v2vFrame.style.color = v2vCrop ? COL.green : COL.bright;
                 v2vDenoise.style.display = active ? "" : "none";
+                dnWrap.style.display = active ? "inline-flex" : "none";
+                if (document.activeElement !== dnSl) {
+                    const dv = Number(widgetValue(node, "v2v_denoise", 0.55)) || 0.55;
+                    dnSl.value = String(dv);
+                    dnVal.textContent = dv.toFixed(2);
+                }
                 v2vNote.style.display = active ? "" : "none";
                 if (active && v2vCrop) {
                     v2vNote.style.color = COL.green;
@@ -5024,7 +5044,7 @@ function attachTimeline(node) {
         "first_frame_file", "last_frame_file", "middle_frame_files", "ref_image_files",
         "first_frame_crop", "last_frame_crop", "middle_frame_crops", "ref_image_crops",
         "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_crops",
-        "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds", "v2v_crop"];
+        "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds", "v2v_crop", "v2v_denoise"];
     let rawVisible = false;
     for (const name of HIDDEN_WIDGETS) setWidgetVisible(node, getWidget(node, name), false);
     node.addWidget("button", "⤢ open timeline editor", null, openFullscreen);

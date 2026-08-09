@@ -41,13 +41,16 @@ Set the first frame from the picker's **output folder** tab (newest first) — g
 Every image and video card has **⛶** — drag/zoom the window over what the model should see. Keyframes are locked to the output aspect, refs/videos keep their own. Corner-drag for exact size, wheel to zoom (Shift = fine), scrub bar on videos.
 
 ### I want to restyle existing footage (v2v)
-Pick footage in the editor's **🎞 v2v bar** (or feed the `v2v_images`/`v2v_audio` sockets); the latent output becomes the encoded footage. Sample at **denoise 0.3–0.7** — the bar reminds you: that dial lives on your KSampler, not this node. **✂ section…** scrubs the clip and sets the in/out points visually; **⛶** reframes the footage to your width×height canvas (landscape → vertical, etc.) — unframed, the canvas follows the footage instead. The selected section shows as a **ghosted filmstrip behind the timeline** so your keyframes and beats sit over the actual footage; the "ghost" dial sets its opacity (0 hides it).
+Pick footage in the editor's **🎞 v2v bar** (or feed the `v2v_images`/`v2v_audio` sockets); the latent output becomes the encoded footage. Sample at **denoise 0.3–0.7** — the bar has a **denoise slider** that flows out of the node's `v2v_denoise` output: wire it → **H3 Basic Scheduler (wired denoise)** → your sampler's sigmas and the editor drives the restyle amount (with a plain KSampler, match its denoise by hand). **✂ section…** scrubs the clip and sets the in/out points visually; **⛶** reframes the footage to your width×height canvas (landscape → vertical, etc.) — unframed, the canvas follows the footage instead. The selected section shows as a **ghosted filmstrip behind the timeline** so your keyframes and beats sit over the actual footage; the "ghost" dial sets its opacity (0 hides it).
 
 ### I want to restyle only part of a clip and keep the rest untouched
 Use **H3 Frame Range → H3 Video To Latent → KSampler → H3 Splice** — recipe diagram in the [README](README.md#section-restyle--bake-it-back-in). Pin the section's first/last frames from the untouched footage so the joins can't drift.
 
 ### I want a LoRA to only affect part of the clip
 **MiniMax H3 Temporal LoRA Blend** node, before the sampler: `model_base` from the checkpoint loader, `model_a` = base → your LoRA loader(s) (used *before* `boundary_seconds`), `model_b` for after (empty = the LoRA just drops out). Feather softens the handover; `audio_from` decides whether the soundtrack follows the ramp. Costs ~2× sampling time. Never put the turbo LoRA on one side only.
+
+### I want to see the render without leaving the editor
+Hit **▶ queue**: a progress strip appears in the header, the sampling preview streams into a corner dock, and when it finishes the clip **plays right there** — with **⏭ last frame → first** and **+ as video ref** buttons to chain straight into the next shot.
 
 ### I want to save my whole setup
 **💾 save setup** → JSON with everything (prompt, frames, refs, framings, strengths). **📂 load setup** restores it on any fresh node — it tells you if a socket-fed input can't travel.

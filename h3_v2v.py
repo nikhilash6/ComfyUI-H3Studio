@@ -27,6 +27,7 @@ import math
 import torch
 
 import comfy.nested_tensor
+import comfy.samplers
 from comfy_api.latest import io
 
 from .minimax_h3_guide import (FPS_HINT, _resize, encode_ref_audio, CANVAS_MULTIPLE)
@@ -280,3 +281,39 @@ class H3Splice(io.ComfyNode):
             audio = {"waveform": torch.zeros(1, 2, max(1, int(round(images.shape[0] / fps * 44100)))),
                      "sample_rate": 44100}
         return io.NodeOutput(images, audio)
+
+
+class H3BasicScheduler(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="H3BasicScheduler",
+            display_name="H3 Basic Scheduler (wired denoise)",
+            category="sampling/custom_sampling/schedulers",
+            description=(
+                "Core's BasicScheduler with denoise as a SOCKET, so the Guide "
+                "node's v2v_denoise output can drive the restyle amount over a "
+                "wire: Guide.v2v_denoise -> here -> SamplerCustom's sigmas. Same "
+                "maths as core, drop-in otherwise."),
+            inputs=[
+                io.Model.Input("model"),
+                io.Combo.Input("scheduler", options=comfy.samplers.SCHEDULER_NAMES),
+                io.Int.Input("steps", default=20, min=1, max=10000),
+                io.Float.Input("denoise", default=1.0, min=0.0, max=1.0,
+                               force_input=True,
+                               tooltip="Wire the Guide node's v2v_denoise output here (or any float)."),
+            ],
+            outputs=[io.Sigmas.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, scheduler, steps, denoise) -> io.NodeOutput:
+        total_steps = steps
+        if denoise < 1.0:
+            if denoise <= 0.0:
+                return io.NodeOutput(torch.FloatTensor([]))
+            total_steps = int(steps / denoise)
+        sigmas = comfy.samplers.calculate_sigmas(
+            model.get_model_object("model_sampling"), scheduler, total_steps).cpu()
+        sigmas = sigmas[-(steps + 1):]
+        return io.NodeOutput(sigmas)

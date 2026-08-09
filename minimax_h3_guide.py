@@ -659,6 +659,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="Restyle only a section of the v2v source: start, in seconds."),
                 io.Float.Input("v2v_end_seconds", default=0.0, min=0.0, max=10000.0, step=0.1,
                     tooltip="Section end in seconds; 0 = to the end of the source."),
+                io.Float.Input("v2v_denoise", default=0.55, min=0.0, max=1.0, step=0.05,
+                    tooltip="The v2v restyle amount, as a VALUE THIS NODE EMITS (third output): wire it to H3 Basic Scheduler's denoise input -> SamplerCustom/sigmas, and the editor's v2v bar controls the whole restyle. Has no effect on this node's own outputs otherwise; with a plain KSampler just set its denoise to match. ~0.3 barely touches the footage, 0.4-0.7 restyles keeping motion, 1.0 ignores it."),
                 io.String.Input("v2v_crop", default="",
                     tooltip="Optional framing for the v2v source: 'center_x, center_y, zoom' (the editor's v2v ⛶ writes this). The window is locked to the width x height widgets' aspect and the footage is resized to exactly that canvas -- so WITH a framing, width/height matter again (reframe landscape footage into a vertical clip, etc.). Without one, the canvas follows the footage and width/height are ignored."),
                 io.Autogrow.Input("ref_masks", optional=True,
@@ -678,7 +680,9 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 io.Audio.Input("v2v_audio", optional=True,
                     tooltip="Soundtrack for the v2v source (wins over a file's embedded audio). Needs audio_vae."),
             ],
-            outputs=[io.Conditioning.Output(display_name="positive"), io.Latent.Output()],
+            outputs=[io.Conditioning.Output(display_name="positive"), io.Latent.Output(),
+                     io.Float.Output(display_name="v2v_denoise",
+                                     tooltip="The v2v_denoise widget's value -- wire to H3 Basic Scheduler's denoise socket so the editor drives the restyle amount.")],
         )
 
     @classmethod
@@ -757,7 +761,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 ref_video_spec="", ref_video_files="", ref_video_megapixels=0.0,
                 ref_video_crops="",
                 v2v_video_file="", v2v_start_seconds=0.0, v2v_end_seconds=0.0,
-                v2v_crop="",
+                v2v_crop="", v2v_denoise=0.55,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -1143,7 +1147,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 "minimax_keyframes": keyframes,
                 "minimax_frame_count": frame_count,
             })
-        return io.NodeOutput(cond, latent)
+        return io.NodeOutput(cond, latent, float(v2v_denoise))
 
 
 class MiniMaxH3GuideExtension(ComfyExtension):
@@ -1151,8 +1155,10 @@ class MiniMaxH3GuideExtension(ComfyExtension):
         from .load_image_zoom_pan import LoadImageZoomPan
         from .h3_v2v import H3VideoToLatent, H3FrameRange, H3Splice
         from .h3_temporal_lora import H3TemporalLoraBlend
+        from .h3_v2v import H3BasicScheduler
         return [MiniMaxH3ImageToVideoGuide, LoadImageZoomPan,
-                H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend]
+                H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend,
+                H3BasicScheduler]
 
 
 async def comfy_entrypoint() -> MiniMaxH3GuideExtension:
