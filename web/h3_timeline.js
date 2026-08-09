@@ -1384,7 +1384,7 @@ function attachTimeline(node) {
     // ---- final-frame extraction: chain from any footage in one click --------
     // Decodes the video's last frame in the browser, uploads it as a PNG and
     // hands back the input-folder name. File videos only (sockets have no URL).
-    function extractLastFrame(name, onDone) {
+    function extractLastFrame(name, onDone, atSeconds) {
         toast("extracting final frame…");
         const vv = document.createElement("video");
         vv.muted = true;
@@ -1401,7 +1401,9 @@ function attachTimeline(node) {
             if (!isFinite(vv.duration) || vv.duration <= 0) return fail("no duration reported");
             // a hair before the end: seeking to exactly duration can land past
             // the last decodable frame in some containers
-            vv.currentTime = Math.max(0, vv.duration - 0.001);
+            const target = (atSeconds && atSeconds > 0)
+                ? Math.min(atSeconds, vv.duration) : vv.duration;
+            vv.currentTime = Math.max(0, target - 0.001);
         }, { once: true });
         vv.addEventListener("seeked", async () => {
             try {
@@ -1428,7 +1430,11 @@ function attachTimeline(node) {
     // ---- the reel: an ordered chain of clips, persisted per node -----------
     function reelGet() {
         const r = node.properties?.h3_reel;
-        return Array.isArray(r) ? r.slice() : [];
+        if (!Array.isArray(r)) return [];
+        // legacy reels stored bare names — normalize to edit objects
+        return r.map((e) => typeof e === "string"
+            ? { name: e, in: 0, out: 0, xfade: 0 }
+            : { in: 0, out: 0, xfade: 0, ...e });
     }
     function reelSet(list) {
         node.properties = node.properties || {};
@@ -1437,12 +1443,12 @@ function attachTimeline(node) {
     }
     function reelAdd(name) {
         const list = reelGet();
-        if (list[list.length - 1] === name) return;   // no immediate dupes
-        list.push(name);
+        if (list[list.length - 1]?.name === name) return;   // no immediate dupes
+        list.push({ name, in: 0, out: 0, xfade: 0 });
         reelSet(list);
     }
 
-    function finalFrameToFirst(videoName) {
+    function finalFrameToFirst(videoName, atSeconds) {
         reelAdd(videoName);   // a continuation docks its source in the chain
         if (inputConnected(node, "first_frame")) {
             toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph, then press ⏭ again", true);
@@ -1458,7 +1464,7 @@ function attachTimeline(node) {
             toast(`final frame set as first frame (${fname})`
                 + (mismatch ? " — aspect differs from the output, ⛶ it on the first-frame card" : ""),
                 !!mismatch);
-        });
+        }, atSeconds);
     }
 
     // beat -> waypoint: the beat's moment and words become a keyframe's time and
@@ -3732,10 +3738,17 @@ function attachTimeline(node) {
             exportB.disabled = true;
             exportB.textContent = "exporting…";
             try {
+                const fx = fxGet();
                 const r = await api.fetchApi("/h3guide/reel_export", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ names: list, fps: FPS }),
+                    body: JSON.stringify({
+                        clips: list.map((e) => ({ name: e.name, in: e.in || 0,
+                            out: e.out || 0, xfade: e.xfade || 0 })),
+                        fade_in: fx.fadeIn || 0,
+                        fade_out: fx.fadeOut || 0,
+                        fps: FPS,
+                    }),
                 });
                 const j = await r.json();
                 if (j.error) throw new Error(j.error);
@@ -3748,7 +3761,31 @@ function attachTimeline(node) {
                 exportB.textContent = "⇧ export as one video";
             }
         });
-        reelCtl.append(reelAddB, rerollB, exportB);
+        const fxGet = () => node.properties?.h3_reel_fx || {};
+        const fxField = (label, key) => {
+            const f = el("input");
+            Object.assign(f.style, {
+                width: "42px", background: COL.input, color: COL.bright,
+                border: `1px solid ${COL.border}`, borderRadius: "3px",
+                fontSize: "12px", padding: "2px 4px", fontFamily: "monospace",
+                textAlign: "center",
+            });
+            f.title = label + " for the whole reel, in seconds (video to black, audio to silence) — applied at export only";
+            f.value = String(fxGet()[key] || 0);
+            f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
+            f.addEventListener("blur", () => {
+                const v = Math.max(0, Math.min(10, parseFloat(f.value) || 0));
+                f.value = String(v);
+                node.properties = node.properties || {};
+                node.properties.h3_reel_fx = { ...fxGet(), [key]: v };
+            });
+            return f;
+        };
+        const fadeInF = fxField("fade in", "fadeIn");
+        const fadeOutF = fxField("fade out", "fadeOut");
+        reelCtl.append(el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
+            el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
+            reelAddB, rerollB, exportB);
         reelHead.appendChild(reelCtl);
         const reelRow = el("div", {
             display: "none", gap: "10px", padding: "8px 16px 14px", overflowX: "auto",
@@ -3759,25 +3796,138 @@ function attachTimeline(node) {
             reelHead.style.display = list.length ? "flex" : "none";
             reelRow.style.display = list.length ? "flex" : "none";
             reelRow.textContent = "";
-            list.forEach((name, i) => {
+            list.forEach((entry, i) => {
+                if (i > 0) {
+                    // the joint: crossfade FROM the previous clip into this one
+                    const joint = el("div", {
+                        display: "flex", flexDirection: "column", alignItems: "center",
+                        justifyContent: "center", gap: "2px", alignSelf: "center",
+                    });
+                    const xf = el("input");
+                    Object.assign(xf.style, {
+                        width: "38px", background: COL.input, color: COL.bright,
+                        border: `1px solid ${COL.border}`, borderRadius: "3px",
+                        fontSize: "11px", padding: "1px 2px", fontFamily: "monospace",
+                        textAlign: "center",
+                    });
+                    xf.value = String(list[i - 1].xfade || 0);
+                    xf.title = "crossfade between these clips, in seconds (0 = hard cut). Video blends, audio equal-power crossfades. Applied at export only.";
+                    xf.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") xf.blur(); });
+                    xf.addEventListener("blur", () => {
+                        const l = reelGet();
+                        l[i - 1].xfade = Math.max(0, Math.min(5, parseFloat(xf.value) || 0));
+                        reelSet(l);
+                    });
+                    joint.append(el("span", {
+                        color: (list[i - 1].xfade || 0) > 0 ? COL.green : COL.text,
+                        fontSize: "13px",
+                    }, "⧉"), xf);
+                    reelRow.appendChild(joint);
+                }
                 const c = el("div", {
-                    width: "150px", flex: "0 0 auto", background: COL.panel,
+                    width: "172px", flex: "0 0 auto", background: COL.panel,
                     border: `1px solid ${COL.border}`, borderRadius: "6px",
                     overflow: "hidden",
                 });
+                let dur = 0;
+                const endOf = () => (entry.out > 0 ? Math.min(entry.out, dur || entry.out) : dur);
                 const vv = el("video");
                 vv.muted = true; vv.preload = "metadata"; vv.controls = true;
-                vv.src = inputFileUrl(name);
-                Object.assign(vv.style, { width: "150px", height: "84px",
+                vv.src = inputFileUrl(entry.name);
+                Object.assign(vv.style, { width: "172px", height: "96px",
                     objectFit: "cover", background: "#222", display: "block" });
+                // preview honors the trim: playback loops inside [in, out]
+                vv.addEventListener("play", () => {
+                    if (dur && (vv.currentTime < entry.in || vv.currentTime >= endOf()))
+                        vv.currentTime = entry.in || 0;
+                });
+                vv.addEventListener("timeupdate", () => {
+                    if (!dur || vv.paused) return;
+                    if (vv.currentTime >= endOf() || vv.currentTime < (entry.in || 0) - 0.25)
+                        vv.currentTime = entry.in || 0;
+                });
                 c.appendChild(vv);
-                const foot = el("div", { padding: "4px 6px", display: "flex",
+
+                // iOS-style trim strip: drag the green handles
+                const strip = el("div", {
+                    position: "relative", height: "14px", margin: "4px 6px 0",
+                    background: "#101010", borderRadius: "3px",
+                });
+                const keep = el("div", {
+                    position: "absolute", top: "0", bottom: "0",
+                    background: "rgba(158,228,147,0.25)", pointerEvents: "none",
+                });
+                const hL = el("div", {
+                    position: "absolute", top: "-2px", bottom: "-2px", width: "8px",
+                    background: COL.green, borderRadius: "2px", cursor: "ew-resize",
+                    touchAction: "none",
+                });
+                const hR = el("div", {
+                    position: "absolute", top: "-2px", bottom: "-2px", width: "8px",
+                    background: COL.green, borderRadius: "2px", cursor: "ew-resize",
+                    touchAction: "none",
+                });
+                strip.append(keep, hL, hR);
+                const ro = el("div", {
+                    color: COL.text, fontSize: "10px", fontFamily: "monospace",
+                    padding: "1px 6px 0", textAlign: "center",
+                });
+                const paintTrim = () => {
+                    if (!dur) { ro.textContent = "…"; return; }
+                    const a = (entry.in || 0) / dur;
+                    const b = endOf() / dur;
+                    keep.style.left = (a * 100) + "%";
+                    keep.style.width = (Math.max(0, b - a) * 100) + "%";
+                    hL.style.left = "calc(" + (a * 100) + "% - 4px)";
+                    hR.style.left = "calc(" + (b * 100) + "% - 4px)";
+                    const trimmed = (entry.in || 0) > 0 || entry.out > 0;
+                    ro.textContent = (entry.in || 0).toFixed(1) + "–" + endOf().toFixed(1)
+                        + "s of " + dur.toFixed(1) + "s" + (trimmed ? " ✂" : "");
+                    ro.style.color = trimmed ? COL.green : COL.text;
+                };
+                vv.addEventListener("loadedmetadata", () => {
+                    dur = isFinite(vv.duration) ? vv.duration : 0;
+                    paintTrim();
+                });
+                const dragHandle = (handle, which) => {
+                    handle.addEventListener("pointerdown", (ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        handle.setPointerCapture(ev.pointerId);
+                        const rect = strip.getBoundingClientRect();
+                        const move = (e2) => {
+                            if (!dur) return;
+                            let t = Math.min(Math.max((e2.clientX - rect.left) / rect.width, 0), 1) * dur;
+                            t = Math.round(t * 10) / 10;
+                            if (which === "in") {
+                                entry.in = Math.max(0, Math.min(t, endOf() - 0.2));
+                            } else {
+                                entry.out = Math.max(t, (entry.in || 0) + 0.2);
+                                if (entry.out >= dur - 0.05) entry.out = 0;   // snapped to end = untrimmed
+                            }
+                            paintTrim();
+                        };
+                        const up2 = () => {
+                            handle.removeEventListener("pointermove", move);
+                            handle.removeEventListener("pointerup", up2);
+                            const l = reelGet();
+                            l[i] = { ...l[i], in: entry.in || 0, out: entry.out || 0 };
+                            reelSet(l);
+                        };
+                        handle.addEventListener("pointermove", move);
+                        handle.addEventListener("pointerup", up2);
+                    });
+                };
+                dragHandle(hL, "in");
+                dragHandle(hR, "out");
+
+                const foot = el("div", { padding: "2px 6px 5px", display: "flex",
                     flexDirection: "column", gap: "3px" });
-                const nm = name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                const nm = entry.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
                 foot.appendChild(el("div", {
                     color: COL.text, fontSize: "10px", whiteSpace: "nowrap",
                     overflow: "hidden", textOverflow: "ellipsis",
-                }, `${i + 1}. ${nm}`));
+                }, (i + 1) + ". " + nm));
                 const row = el("div", { display: "flex", gap: "4px", alignItems: "center" });
                 const mk = (label, title, fn, color) => {
                     const b = el("button", { ...btnStyle, padding: "0 6px",
@@ -3799,17 +3949,18 @@ function attachTimeline(node) {
                         [l[i + 1], l[i]] = [l[i], l[i + 1]];
                         reelSet(l);
                     }),
-                    mk("⏭", "continue from this clip (final frame → first frame)",
-                        () => finalFrameToFirst(name), COL.green),
+                    mk("⏭", "continue from this clip's OUT point (final kept frame → first frame)",
+                        () => finalFrameToFirst(entry.name, entry.out > 0 ? entry.out : undefined),
+                        COL.green),
                     mk("🎥", "add this clip as a reference video — its motion, look and sound condition the next render",
-                        () => addFileVideo(name), COL.green),
+                        () => addFileVideo(entry.name), COL.green),
                     mk("✕", "remove from the chain (the file stays on disk)", () => {
                         const l = reelGet();
                         l.splice(i, 1);
                         reelSet(l);
                     }, COL.red));
                 foot.appendChild(row);
-                c.appendChild(foot);
+                c.append(strip, ro, foot);
                 reelRow.appendChild(c);
             });
         }
