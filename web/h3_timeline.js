@@ -1405,7 +1405,25 @@ function attachTimeline(node) {
         }, { once: true });
     }
 
+    // ---- the reel: an ordered chain of clips, persisted per node -----------
+    function reelGet() {
+        const r = node.properties?.h3_reel;
+        return Array.isArray(r) ? r.slice() : [];
+    }
+    function reelSet(list) {
+        node.properties = node.properties || {};
+        node.properties.h3_reel = list;
+        state.fs?.renderReel?.();
+    }
+    function reelAdd(name) {
+        const list = reelGet();
+        if (list[list.length - 1] === name) return;   // no immediate dupes
+        list.push(name);
+        reelSet(list);
+    }
+
     function finalFrameToFirst(videoName) {
+        reelAdd(videoName);   // a continuation docks its source in the chain
         if (inputConnected(node, "first_frame")) {
             toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph, then press ⏭ again", true);
             return;
@@ -2596,7 +2614,10 @@ function attachTimeline(node) {
         const onExecuted = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
             const got = pickOutput(detail?.output);
-            if (got) showResult(got.name, got.video);
+            if (got) {
+                showResult(got.name, got.video);
+                if (got.video && reelGet().length) reelAdd(got.name);
+            }
         };
         const onDone = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
@@ -3518,8 +3539,123 @@ function attachTimeline(node) {
             flex: "0 0 auto", borderTop: `1px solid ${COL.divider}`, padding: "6px 16px",
             fontSize: "12px", color: COL.text,
         });
+        // ---- REEL strip ----
+        const reelHead = el("div", {
+            ...sectionHeadStyle(), display: "none", justifyContent: "space-between",
+            gap: "16px", alignItems: "center",
+        });
+        reelHead.appendChild(el("span", null,
+            "REEL — the chain so far, in order. ⏭ continues from a clip; export stitches them into one video"));
+        const reelCtl = el("span", { display: "inline-flex", gap: "6px", alignItems: "center" });
+        const reelAddB = el("button", btnStyle, "+ clip…");
+        reelAddB.title = "add an existing video (output tab = previous renders) to the chain";
+        reelAddB.addEventListener("click", () => openVideoPicker((n) => reelAdd(n)));
+        const rerollB = el("button", btnStyle, "🎲 re-roll last");
+        rerollB.title = "drop the newest clip from the chain and queue again — the replacement will take its place";
+        rerollB.addEventListener("click", async () => {
+            const list = reelGet();
+            if (!list.length) return;
+            list.pop();
+            reelSet(list);
+            try {
+                run.armed = true;
+                await app.queuePrompt(0);
+                toast("re-rolling — the new render will join the reel");
+            } catch (e) {
+                run.armed = false;
+                toast("queue failed: " + (e?.message || e), true);
+            }
+        });
+        const exportB = el("button", { ...btnStyle, color: COL.green }, "⇧ export as one video");
+        exportB.addEventListener("click", async () => {
+            const list = reelGet();
+            if (list.length < 1) return;
+            exportB.disabled = true;
+            exportB.textContent = "exporting…";
+            try {
+                const r = await api.fetchApi("/h3guide/reel_export", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ names: list, fps: FPS }),
+                });
+                const j = await r.json();
+                if (j.error) throw new Error(j.error);
+                showResult(j.name, true);
+                toast(`reel exported — ${list.length} clip(s), ${j.frames} frames → output/${j.name.replace(/\s*\[\w+\]\s*$/, "")}`);
+            } catch (e) {
+                toast("export failed: " + (e?.message || e), true);
+            } finally {
+                exportB.disabled = false;
+                exportB.textContent = "⇧ export as one video";
+            }
+        });
+        reelCtl.append(reelAddB, rerollB, exportB);
+        reelHead.appendChild(reelCtl);
+        const reelRow = el("div", {
+            display: "none", gap: "10px", padding: "8px 16px 14px", overflowX: "auto",
+            flex: "0 0 auto", alignItems: "flex-start",
+        });
+        function renderReel() {
+            const list = reelGet();
+            reelHead.style.display = list.length ? "flex" : "none";
+            reelRow.style.display = list.length ? "flex" : "none";
+            reelRow.textContent = "";
+            list.forEach((name, i) => {
+                const c = el("div", {
+                    width: "150px", flex: "0 0 auto", background: COL.panel,
+                    border: `1px solid ${COL.border}`, borderRadius: "6px",
+                    overflow: "hidden",
+                });
+                const vv = el("video");
+                vv.muted = true; vv.preload = "metadata"; vv.controls = true;
+                vv.src = inputFileUrl(name);
+                Object.assign(vv.style, { width: "150px", height: "84px",
+                    objectFit: "cover", background: "#222", display: "block" });
+                c.appendChild(vv);
+                const foot = el("div", { padding: "4px 6px", display: "flex",
+                    flexDirection: "column", gap: "3px" });
+                const nm = name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                foot.appendChild(el("div", {
+                    color: COL.text, fontSize: "10px", whiteSpace: "nowrap",
+                    overflow: "hidden", textOverflow: "ellipsis",
+                }, `${i + 1}. ${nm}`));
+                const row = el("div", { display: "flex", gap: "4px", alignItems: "center" });
+                const mk = (label, title, fn, color) => {
+                    const b = el("button", { ...btnStyle, padding: "0 6px",
+                        fontSize: "11px", color: color || COL.bright }, label);
+                    b.title = title;
+                    b.addEventListener("click", fn);
+                    return b;
+                };
+                row.append(
+                    mk("◀", "move earlier", () => {
+                        if (i === 0) return;
+                        const l = reelGet();
+                        [l[i - 1], l[i]] = [l[i], l[i - 1]];
+                        reelSet(l);
+                    }),
+                    mk("▶", "move later", () => {
+                        const l = reelGet();
+                        if (i >= l.length - 1) return;
+                        [l[i + 1], l[i]] = [l[i], l[i + 1]];
+                        reelSet(l);
+                    }),
+                    mk("⏭", "continue from this clip (final frame → first frame)",
+                        () => finalFrameToFirst(name), COL.green),
+                    mk("✕", "remove from the chain (the file stays on disk)", () => {
+                        const l = reelGet();
+                        l.splice(i, 1);
+                        reelSet(l);
+                    }, COL.red));
+                foot.appendChild(row);
+                c.appendChild(foot);
+                reelRow.appendChild(c);
+            });
+        }
+
         main.append(promptHead, chipRow, promptTA, v2vBar, stripHead, strip, trackHead, track,
-            refsHead, refsRow, vidHead, vidRow, audioHead, audioRow, helpStrip);
+            refsHead, refsRow, vidHead, vidRow, audioHead, audioRow,
+            reelHead, reelRow, helpStrip);
         body.append(main, inspector);
         root.append(header, body);
 
@@ -4926,6 +5062,7 @@ function attachTimeline(node) {
             maskWrap.style.display = anyMask ? "inline-flex" : "none";
             updateCostMeter();
             buildInspector();
+            renderReel();
             renderTrack();
         }
 
@@ -4933,7 +5070,7 @@ function attachTimeline(node) {
         ro?.observe(main);
         root.appendChild(resPanel);   // render results dock over the editor
         document.body.appendChild(root);
-        state.fs = { root, onKey, fill, renderTrack, ro, apiEvents };
+        state.fs = { root, onKey, fill, renderTrack, renderReel, ro, apiEvents };
         fill();
     }
     node._h3OpenFS = openFullscreen;
