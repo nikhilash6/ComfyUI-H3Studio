@@ -449,6 +449,7 @@ function attachTimeline(node) {
     const state = {
         mids: [], beats: [], refs: [], midsAuto: true, refsAuto: true,
         videoRefs: [], videoRefsAuto: true, videoMeta: new Map(),
+        guideAudio: null,    // {name, peaks, bins, onsets, duration} | {name} loading | {name, failed}
         firstCrop: null, lastCrop: null, midCrops: [], refCrops: [], videoCrops: [],
         sel: null,           // {kind:'first'|'last'|'mid'|'beat'|'ref', i?}
         reelTarget: null,    // {idx, name} armed by a reel card's ⚙ — offer replace
@@ -527,6 +528,118 @@ function attachTimeline(node) {
             state.fs?.fill?.();
         }, { once: true });
         return null;
+    }
+
+    // ---- ♪ guide track: waveform + onsets as a timing layer ---------------
+    // Display-only — it never conditions the render (→ ref does that).
+    function ensureGuideAudio(name) {
+        const have = state.guideAudio;
+        if (have && have.name === name) return have.peaks ? have : null;
+        state.guideAudio = { name };   // loading marker
+        (async () => {
+            try {
+                const resp = await fetch(inputFileUrl(name));
+                if (!resp.ok) throw new Error("fetch " + resp.status);
+                const buf = await resp.arrayBuffer();
+                const actx = new (window.AudioContext || window.webkitAudioContext)();
+                const audio = await actx.decodeAudioData(buf);
+                actx.close();
+                const ch = audio.numberOfChannels, len = audio.length;
+                const mono = new Float32Array(len);
+                for (let c = 0; c < ch; c++) {
+                    const d = audio.getChannelData(c);
+                    for (let s = 0; s < len; s++) mono[s] += d[s] / ch;
+                }
+                // min/max peaks for drawing
+                const BINS = 4000;
+                const per = Math.max(1, Math.floor(len / BINS));
+                const peaks = new Float32Array(BINS * 2);
+                for (let b = 0; b < BINS; b++) {
+                    let lo = 0, hi = 0;
+                    for (let s = b * per, s1 = Math.min(len, s + per); s < s1; s++) {
+                        const v = mono[s];
+                        if (v < lo) lo = v;
+                        if (v > hi) hi = v;
+                    }
+                    peaks[b * 2] = lo;
+                    peaks[b * 2 + 1] = hi;
+                }
+                // onsets: 10ms RMS energy flux, local maxima over an adaptive
+                // threshold, 120ms minimum spacing — crude but lands on the hits
+                const win = Math.round(audio.sampleRate * 0.01);
+                const nw = Math.floor(len / win);
+                const rms = new Float32Array(nw);
+                for (let w = 0; w < nw; w++) {
+                    let acc = 0;
+                    for (let s = w * win, s1 = s + win; s < s1; s++) acc += mono[s] * mono[s];
+                    rms[w] = Math.sqrt(acc / win);
+                }
+                const flux = new Float32Array(nw);
+                for (let w = 1; w < nw; w++) flux[w] = Math.max(0, rms[w] - rms[w - 1]);
+                let mean = 0;
+                for (const v of flux) mean += v;
+                mean /= Math.max(1, nw);
+                let sd = 0;
+                for (const v of flux) sd += (v - mean) * (v - mean);
+                sd = Math.sqrt(sd / Math.max(1, nw));
+                const thr = mean + 1.5 * sd;
+                const onsets = [];
+                let last = -1;
+                for (let w = 2; w < nw - 2; w++) {
+                    const t = w * 0.01;
+                    if (flux[w] > thr && flux[w] >= flux[w - 1] && flux[w] >= flux[w + 1]
+                        && t - last > 0.12) {
+                        onsets.push(t);
+                        last = t;
+                    }
+                }
+                if (state.guideAudio?.name !== name) return;   // superseded meanwhile
+                state.guideAudio = { name, peaks, bins: BINS, onsets, duration: audio.duration };
+            } catch (e) {
+                if (state.guideAudio?.name === name)
+                    state.guideAudio = { name, failed: true };
+                toast("couldn't decode the guide audio in the browser", true);
+            }
+            state.fs?.fill?.();
+            state.fs?.renderTrack?.();
+        })();
+        return null;
+    }
+
+    function guideOffset() {
+        // where in the song this clip starts. follow mode = the reel's summed
+        // kept duration, so the timeline always shows the NEXT clip's slice;
+        // null = still reading clip durations
+        const g = node.properties?.h3_guide || {};
+        if (!g.follow) return Number(g.offset) || 0;
+        let total = 0;
+        for (const e of reelGet()) {
+            if (e.out > 0) total += Math.max(0, e.out - (e.in || 0));
+            else {
+                ensureVideoMeta(e.name);
+                const d = state.videoMeta.get(e.name)?.dur;
+                if (!d) return null;
+                total += Math.max(0, d - (e.in || 0));
+            }
+        }
+        return total;
+    }
+
+    function guideSnapFrac(frac, tolFrac) {
+        const g = node.properties?.h3_guide || {};
+        const ga = state.guideAudio;
+        if (!g.snap || !g.name || ga?.name !== g.name || !ga?.onsets?.length) return frac;
+        const off = guideOffset();
+        if (off == null) return frac;
+        const winS = fc() / FPS;
+        const t = off + frac * winS;
+        let bd = 1e9, best = null;
+        for (const o of ga.onsets) {
+            const d = Math.abs(o - t);
+            if (d < bd) { bd = d; best = o; }
+        }
+        if (best == null || bd > (tolFrac || 0.01) * winS) return frac;
+        return Math.min(1, Math.max(0, (best - off) / winS));
     }
 
     // ---- widget <-> state sync -------------------------------------------
@@ -4180,6 +4293,60 @@ function attachTimeline(node) {
         trackHead.appendChild(el("span", null,
             "TIMELINE — markers move in time; the square cap on a stem sets strength"));
         const trackCtl = el("span", { display: "inline-flex", gap: "6px", alignItems: "center" });
+        // ♪ guide track: lay a song under the timeline so waypoints and beats
+        // land on the music. Display + snapping only — never conditions the
+        // render unless explicitly sent to ref audio.
+        const guideSet = (patch) => {
+            node.properties = node.properties || {};
+            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), ...patch };
+            fill();
+            renderTrack();
+        };
+        trackCtl.appendChild(el("span", { fontSize: "11px", color: COL.text }, "♪ guide"));
+        const guideB = el("button", { ...btnStyle, padding: "1px 8px", fontSize: "11px" }, "pick…");
+        guideB.title = "lay an audio file under the timeline as a TIMING GUIDE — waveform + detected hits drawn on the beat lane, so waypoints and beats land on the music. Upload, input folder, mic or free web search. Display-only: it does not condition the render (→ ref does that).";
+        guideB.addEventListener("click", () => openAudioPicker((n) => {
+            state.guideAudio = null;   // new file: decode fresh
+            guideSet({ name: n });
+        }));
+        const guideOffLab = el("span", { fontSize: "11px", color: COL.text }, "at");
+        const guideOff = dimField(46);
+        guideOff.title = "where in the song this clip starts, in seconds (typing here turns 'follow reel' off)";
+        guideOff.addEventListener("blur", () => {
+            const v = parseFloat(guideOff.value);
+            guideSet({ offset: isFinite(v) && v >= 0 ? v : 0, follow: false });
+        });
+        const mkCheck = (labelTxt, title, key) => {
+            const wrapEl = el("label", { display: "inline-flex", gap: "4px", alignItems: "center",
+                fontSize: "11px", color: COL.text, cursor: "pointer" });
+            const cb = el("input");
+            cb.type = "checkbox";
+            wrapEl.title = title;
+            cb.addEventListener("change", () => guideSet({ [key]: cb.checked }));
+            wrapEl.append(cb, el("span", null, labelTxt));
+            return { wrapEl, cb };
+        };
+        const gFollow = mkCheck("follow reel", "offset follows the reel's summed kept duration — the timeline always shows the NEXT clip's slice of the song", "follow");
+        const gSnap = mkCheck("snap ♪", "dragging waypoints/beats (and clicking the beat lane) snaps to the nearest detected hit", "snap");
+        const guideRefB = el("button", { ...btnStyle, padding: "1px 8px", fontSize: "11px" }, "→ ref");
+        guideRefB.title = "ALSO send this file to reference audio, so the model matches its character (whole file; the model imitates, it doesn't play it back)";
+        guideRefB.addEventListener("click", () => {
+            const g = node.properties?.h3_guide || {};
+            if (g.name) addFileAudio(g.name);
+        });
+        const guideClr = el("button", { ...btnStyle, color: COL.red, padding: "1px 7px", fontSize: "11px" }, "✕");
+        guideClr.title = "remove the guide track (display only — nothing about the render changes)";
+        guideClr.addEventListener("click", () => {
+            state.guideAudio = null;
+            node.properties = node.properties || {};
+            node.properties.h3_guide = {};
+            fill();
+            renderTrack();
+        });
+        trackCtl.append(guideB, guideOffLab, guideOff,
+            el("span", { fontSize: "11px", color: COL.text }, "s"),
+            gFollow.wrapEl, gSnap.wrapEl, guideRefB, guideClr,
+            el("span", { fontSize: "11px", color: "#555" }, "·"));
         trackCtl.appendChild(el("span", { fontSize: "11px", color: COL.text }, "beats mode"));
         const modeSel = miniSelect("timed_text_mode", ["text only", "rope + text", "rope only"],
             "How timed beats reach the model. 'text only' (safe): plain prose like 'At 2.0 seconds: …'. "
@@ -5446,6 +5613,57 @@ function attachTimeline(node) {
             state.mids.forEach((m, i) => drawKf(m.frac, m.strength, COL.mid, "diamond", "mid", i, true));
             drawKf(1, Number(widgetValue(node, "last_frame_strength", 1.0)), COL.cap, "circle", "last", null, !!capInfo("last"));
 
+            // ♪ guide track: this clip's slice of the song, drawn on the beat
+            // lane so beats literally sit on the waveform. Onset ticks above.
+            const gg = node.properties?.h3_guide || {};
+            if (gg.name) {
+                const gaReady = ensureGuideAudio(gg.name);
+                const gaState = state.guideAudio;
+                const off = guideOffset();
+                const winS = fc() / FPS;
+                const W = T.x1 - T.x0;
+                ctx.font = "10px monospace";
+                ctx.textAlign = "left";
+                if (gaState?.failed && gaState.name === gg.name) {
+                    ctx.fillStyle = COL.red;
+                    ctx.globalAlpha = 0.8;
+                    ctx.fillText("♪ couldn't decode the guide audio", T.x0, T.by - 24);
+                } else if (!gaReady || off == null) {
+                    ctx.fillStyle = COL.text;
+                    ctx.globalAlpha = 0.7;
+                    ctx.fillText(off == null ? "♪ waiting for reel clip durations…"
+                        : "♪ decoding…", T.x0, T.by - 24);
+                } else {
+                    ctx.save();
+                    ctx.fillStyle = COL.slider;
+                    ctx.globalAlpha = 0.30;
+                    for (let px = 0; px <= W; px++) {
+                        const t = off + (px / W) * winS;
+                        if (t < 0 || t >= gaReady.duration) continue;
+                        const b = Math.min(gaReady.bins - 1,
+                            Math.floor(t / gaReady.duration * gaReady.bins));
+                        const lo = gaReady.peaks[b * 2], hi = gaReady.peaks[b * 2 + 1];
+                        ctx.fillRect(T.x0 + px, T.by + lo * 14, 1, Math.max(1, (hi - lo) * 14));
+                    }
+                    ctx.globalAlpha = 0.75;
+                    ctx.fillStyle = COL.green;
+                    for (const t of gaReady.onsets) {
+                        if (t < off || t > off + winS) continue;
+                        const x = T.x0 + ((t - off) / winS) * W;
+                        ctx.fillRect(x - 0.5, T.by - 20, 1, 6);
+                    }
+                    ctx.restore();
+                    ctx.fillStyle = COL.text;
+                    ctx.globalAlpha = 0.7;
+                    ctx.fillText(`♪ ${off.toFixed(1)}–${(off + winS).toFixed(1)}s of `
+                        + `${gaReady.duration.toFixed(1)}s`
+                        + (off + winS > gaReady.duration ? " — past the end of the song" : "")
+                        + (gg.snap ? " · snap on" : ""), T.x0, T.by - 24);
+                }
+                ctx.globalAlpha = 1;
+                ctx.textAlign = "center";
+            }
+
             // beat lane with staggered full-text labels
             ctx.strokeStyle = COL.tick;
             ctx.beginPath(); ctx.moveTo(T.x0, T.by); ctx.lineTo(T.x1, T.by); ctx.stroke();
@@ -5558,7 +5776,7 @@ function attachTimeline(node) {
                 state.drag = { kind: "beattime", i: h.i, frac: state.beats[h.i].frac, x: p.x, T };
                 fill();
             } else if (h.kind === "beatlane") {
-                const frac = xToFrac(T, p.x);
+                const frac = guideSnapFrac(xToFrac(T, p.x), 8 / (T.x1 - T.x0));
                 state.beats.push({ frac, text: "" });
                 state.beats.sort((a, b) => a.frac - b.frac);
                 state.sel = { kind: "beat", i: state.beats.findIndex((b) => b.frac === frac && !b.text) };
@@ -5583,7 +5801,9 @@ function attachTimeline(node) {
                 const m = state.mids[d.i];
                 const lo = 1 / (F - 1), hi = (F - 2) / (F - 1);
                 m.frac = Math.min(hi, Math.max(lo, d.frac + (p.x - d.x) / (T.x1 - T.x0)));
-                // show the SNAPPED value that will actually be written
+                m.frac = Math.min(hi, Math.max(lo,
+                    guideSnapFrac(m.frac, 8 / (T.x1 - T.x0))));   // ♪ snap first…
+                // …then show the FRAME-snapped value that will actually be written
                 m.frac = roundHalfEven(m.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, m.frac),
                     text: `${timeOf(m.frac).toFixed(2)}s · f${frameOf(m.frac)} · ${m.strength.toFixed(2)}` };
@@ -5592,6 +5812,7 @@ function attachTimeline(node) {
             } else if (d.kind === "beattime") {
                 const b = state.beats[d.i];
                 b.frac = Math.min(1, Math.max(0, d.frac + (p.x - d.x) / (T.x1 - T.x0)));
+                b.frac = guideSnapFrac(b.frac, 8 / (T.x1 - T.x0));   // ♪ snap first
                 b.frac = roundHalfEven(b.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, b.frac),
                     text: `${timeOf(b.frac).toFixed(2)}s · f${frameOf(b.frac)}` };
@@ -5821,6 +6042,26 @@ function attachTimeline(node) {
                         + (span !== nF ? ` — snapped from ${nF}` : "")
                         + (audioOn ? " · audio continues" : " · picture only");
                     mcNote.title = "the render opens by repeating these context frames; 🎞 add-to-reel auto-trims them so an export never duplicates the join";
+                }
+            }
+            {
+                const g = node.properties?.h3_guide || {};
+                const on = !!g.name;
+                guideB.textContent = on
+                    ? "♪ " + String(g.name).replace(/\s*\[\w+\]\s*$/, "").split("/").pop().slice(0, 20)
+                    : "pick…";
+                guideB.style.color = on ? COL.green : COL.bright;
+                for (const elx of [guideOffLab, guideOff, gFollow.wrapEl, gSnap.wrapEl,
+                                   guideRefB, guideClr])
+                    elx.style.display = on ? "" : "none";
+                if (on) {
+                    guideOff.disabled = !!g.follow;
+                    if (document.activeElement !== guideOff) {
+                        const o = guideOffset();
+                        guideOff.value = o == null ? "…" : String(Math.round(o * 10) / 10);
+                    }
+                    gFollow.cb.checked = !!g.follow;
+                    gSnap.cb.checked = !!g.snap;
                 }
             }
             const firstSock = inputConnected(node, "first_frame");
