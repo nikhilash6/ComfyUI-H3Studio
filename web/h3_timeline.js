@@ -3454,6 +3454,25 @@ function attachTimeline(node) {
         const v2vScrub = el("button", btnStyle, "✂ section…");
         v2vScrub.title = "scrub the footage and set the in/out points visually";
         v2vScrub.addEventListener("click", () => openV2vSection());
+        const v2vMatchB = el("button", btnStyle, "▭ match aspect");
+        v2vMatchB.title = "set the width×height widgets to the FOOTAGE's aspect at the model's trained-area budget (32-snapped). Matters when you ⛶ frame the footage (the canvas is the widgets then) — and it stops keyframe cards warning about a mismatched canvas. Unframed v2v follows the footage regardless.";
+        v2vMatchB.addEventListener("click", () => {
+            const vf = String(widgetValue(node, "v2v_video_file", "")).trim();
+            const meta = vf ? ensureVideoMeta(vf) : null;
+            if (!meta) {
+                toast("still reading the footage dimensions — try again in a second", true);
+                return;
+            }
+            const r = meta.w / meta.h;
+            const area = 768 * 1344;
+            const w = snap32(Math.sqrt(area * r));
+            const h = snap32(Math.sqrt(area / r));
+            setWidget("width", w);
+            setWidget("height", h);
+            saveRes();
+            refresh(true);
+            toast(`canvas matched to the footage: ${w}×${h} (${meta.w}:${meta.h} source)`);
+        });
         const v2vFrame = el("button", btnStyle, "⛶");
         v2vFrame.title = "frame the footage: window locked to the width×height widgets — the restyled clip becomes exactly that canvas (reframe landscape into vertical, etc.)";
         v2vFrame.addEventListener("click", () => {
@@ -3509,7 +3528,7 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "section"),
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            v2vScrub, v2vFrame, ghostWrap, dnWrap, v2vPick, v2vClear, v2vDenoise);
+            v2vScrub, v2vMatchB, v2vFrame, ghostWrap, dnWrap, v2vPick, v2vClear, v2vDenoise);
 
         // motion-context strip: continue a clip with real motion + the same
         // audio (⏭▶ on reel cards / the render dock writes these widgets; this
@@ -6478,6 +6497,7 @@ function attachTimeline(node) {
                 // Surface whichever is true instead of letting w/h fields mislead.
                 const v2vCrop = cropOf({ kind: "v2v" });
                 v2vScrub.style.display = (!vSock && vf) ? "" : "none";
+                v2vMatchB.style.display = (!vSock && vf) ? "" : "none";
                 ghostWrap.style.display = (!vSock && vf) ? "inline-flex" : "none";
                 if (document.activeElement !== ghostSl)
                     ghostSl.value = String(Math.round(ghostOpacity() * 100));
