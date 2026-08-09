@@ -2453,7 +2453,7 @@ function attachTimeline(node) {
             display: "flex", alignItems: "center", gap: "5px",
         });
         stats.append(wField, el("span", null, "×"), hField, lockBtn, aspectSel,
-            el("span", null, "px ·"), lenField, snapNote, qWrap);
+            el("span", null, "px ·"), lenField, snapNote);
 
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
@@ -2610,6 +2610,7 @@ function attachTimeline(node) {
             ["b_preview", onPreview], ["executed", onExecuted],
             ["execution_success", onDone], ["execution_error", onExecError]];
         for (const [ev, fn] of apiEvents) api.addEventListener(ev, fn);
+        stats.appendChild(qWrap);   // defined after the stats row is assembled
         const swapBtn = el("button", btnStyle, "⇄ reverse");
         swapBtn.addEventListener("click", () => {
             if (swapBtn.disabled) return;
