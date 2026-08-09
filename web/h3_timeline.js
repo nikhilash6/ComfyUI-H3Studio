@@ -6492,6 +6492,24 @@ function attachTimeline(node) {
                     v2vEnd.value = String(Number(widgetValue(node, "v2v_end_seconds", 0)) || 0);
                 v2vStart.disabled = v2vEnd.disabled = !active;
                 if (active) snapNote.textContent = "· length follows v2v footage";
+                // keep the length box HONEST in v2v mode: python ignores the
+                // widget and uses the section, so mirror the section into it —
+                // the timeline's time axis and any waypoints then read true
+                if (active && !vSock && vf) {
+                    const meta = state.videoMeta.get(vf);
+                    if (meta?.dur) {
+                        const s0 = Number(widgetValue(node, "v2v_start_seconds", 0)) || 0;
+                        const e0 = Number(widgetValue(node, "v2v_end_seconds", 0)) || 0;
+                        const secs = Math.max(0.2,
+                            (e0 > 0 ? Math.min(e0, meta.dur) : meta.dur) - s0);
+                        const n = Math.min(3600, Math.max(5, Math.round(secs * FPS)));
+                        if (document.activeElement !== lenField
+                            && Number(widgetValue(node, "length", 124)) !== n) {
+                            setWidget("length", n);
+                            lenField.value = (n / FPS).toFixed(1) + "s";
+                        }
+                    }
+                }
                 // with v2v the FOOTAGE defines the canvas (python overrides the
                 // widgets) — UNLESS a ⛶ framing pins it back to width×height.
                 // Surface whichever is true instead of letting w/h fields mislead.
