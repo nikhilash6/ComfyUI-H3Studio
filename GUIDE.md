@@ -52,8 +52,8 @@ Use **H3 Frame Range → H3 Video To Latent → KSampler → H3 Splice** — rec
 ### I want to see the render without leaving the editor
 Hit **▶ queue**: a progress strip appears in the header, the sampling preview streams into a corner dock, and when it finishes the clip **plays right there** — with **⏭ last frame → first** and **+ as video ref** buttons to chain straight into the next shot.
 
-### I want to chain clips into one long video
-Every **⏭ continue** docks the source clip into the **REEL** strip at the bottom, and each new render joins it. Reorder with ◀▶, **⏭** any clip to branch from it, **🎲 re-roll last** to replace the newest take, then **⇧ export as one video** — the chain stitches into a single mp4 (sample-accurate audio, de-clicked joins) in `output/h3reel/`, no external tools.
+### I want to chain clips into one long video (and cut it)
+Every **⏭ continue** docks the source clip into the **REEL** strip at the bottom; add renders from the result dock's **🎞 add to reel**. Each card has an **iOS-style trim strip** — drag the green handles to set in/out (the preview loops the kept range), the **⧉ dial between cards** sets a crossfade, and **fade in / out** on the header bookend the whole piece. Nothing is baked: every trim, crossfade and fade stays editable and only applies at **⇧ export as one video** — a single mp4 (equal-power audio blends, de-clicked cuts) in `output/h3reel/`, no external tools. **⏭** continues from a clip's OUT point, **🎲 re-roll last** replaces the newest take.
 
 ### I want to save my whole setup
 **💾 save setup** → JSON with everything (prompt, frames, refs, framings, strengths). **📂 load setup** restores it on any fresh node — it tells you if a socket-fed input can't travel.
