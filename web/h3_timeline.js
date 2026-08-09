@@ -4619,11 +4619,37 @@ function attachTimeline(node) {
         const reelAddB = el("button", btnStyle, "+ clip…");
         reelAddB.title = "add an existing video (output tab = previous renders) to the chain";
         reelAddB.addEventListener("click", () => openVideoPicker((n) => reelAdd(n)));
+        // one-level undo: a removed card (trims, crossfade, setup and all) can
+        // be brought back for ~12s — covers ✕ and re-roll's pop
+        const undoB = el("button", { ...btnStyle, color: COL.mid, display: "none" }, "↩ undo");
+        undoB.title = "restore the just-removed clip, with its trims, crossfade and setup";
+        let reelUndoInfo = null, reelUndoTimer = null;
+        const stashRemoved = (entry, idx) => {
+            reelUndoInfo = { entry, idx };
+            undoB.style.display = "";
+            clearTimeout(reelUndoTimer);
+            reelUndoTimer = setTimeout(() => {
+                undoB.style.display = "none";
+                reelUndoInfo = null;
+            }, 12000);
+        };
+        undoB.addEventListener("click", () => {
+            if (!reelUndoInfo) return;
+            const l = reelGet();
+            const at = Math.min(reelUndoInfo.idx, l.length);
+            l.splice(at, 0, reelUndoInfo.entry);
+            reelSet(l);
+            undoB.style.display = "none";
+            clearTimeout(reelUndoTimer);
+            reelUndoInfo = null;
+            toast(`clip restored at position ${at + 1}`);
+        });
         const rerollB = el("button", btnStyle, "🎲 re-roll last");
-        rerollB.title = "drop the newest clip from the chain and queue again — the replacement will take its place";
+        rerollB.title = "drop the newest clip from the chain and queue again — the replacement will take its place (↩ undo can bring the dropped one back)";
         rerollB.addEventListener("click", async () => {
             const list = reelGet();
             if (!list.length) return;
+            stashRemoved(list[list.length - 1], list.length - 1);
             list.pop();
             reelSet(list);
             try {
@@ -4695,7 +4721,7 @@ function attachTimeline(node) {
         const playReelB = el("button", { ...btnStyle, color: COL.green }, "▶ play reel");
         playReelB.title = "preview the chain as it stands, without exporting — trims respected, joins as hard cuts (crossfades, fades and luma-match only apply at export)";
         playReelB.addEventListener("click", () => openReelPlayer());
-        reelCtl.append(playReelB,
+        reelCtl.append(undoB, playReelB,
             el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
             reelAddB, rerollB, exportB);
@@ -4835,10 +4861,22 @@ function attachTimeline(node) {
                                 missing.length > 0);
                         },
                         entry.setup ? COL.bright : "#555"),
-                    mk("✕", "remove from the chain (the file stays on disk)", () => {
+                    mk("✕", "remove from the chain (the file stays on disk) — asks twice; ↩ undo lives in the reel header", (ev) => {
+                        const b = ev.currentTarget;
+                        if (b.dataset.confirm !== "1") {
+                            b.dataset.confirm = "1";
+                            b.textContent = "⚠";
+                            setTimeout(() => {
+                                delete b.dataset.confirm;
+                                b.textContent = "✕";
+                            }, 1600);
+                            return;
+                        }
                         const l = reelGet();
+                        stashRemoved(l[i], i);
                         l.splice(i, 1);
                         reelSet(l);
+                        toast("clip removed — ↩ undo (reel header) brings it back for a few seconds");
                     }, COL.red));
                 foot.appendChild(row);
                 c.append(ro, foot);
