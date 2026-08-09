@@ -1444,12 +1444,6 @@ function attachTimeline(node) {
         node.properties = node.properties || {};
         node.properties.h3_reel = list;
         state.fs?.renderReel?.();
-        // follow mode tracks the newest clip live, so the MOTION bar and the
-        // timeline hatch never show a stale continuation source
-        if (mcFollowOn()) {
-            mcApplyFollow();
-            state.fs?.fill?.();
-        }
     }
     function reelAdd(name) {
         const list = reelGet();
@@ -1468,28 +1462,38 @@ function attachTimeline(node) {
         if (!String(widgetValue(node, "motion_context_file", "")).trim()) return 0;
         return mcSnap(Math.max(1, Number(widgetValue(node, "motion_context_frames", 22)) || 22));
     }
-    // follow-reel mode: motion continuation is decided AT QUEUE TIME — every
-    // queue continues from the reel's newest clip (honoring its out-trim). The
-    // widgets are just the resolved snapshot; the reel is the source of truth.
-    function mcFollowOn() {
-        return !!node.properties?.h3_mc_follow;
-    }
-    function mcApplyFollow() {
-        if (!mcFollowOn()) return false;
-        const list = reelGet();
-        const newest = list[list.length - 1];
-        if (!newest) {
-            // nothing to continue — make sure no stale context file lingers
-            if (String(widgetValue(node, "motion_context_file", "")).trim()) {
-                setWidget("motion_context_file", "");
-                setWidget("motion_context_end_seconds", 0);
-            }
-            return false;
-        }
-        setWidget("motion_context_file", newest.name);
+    // motion continuation is chosen AT QUEUE TIME (the ▶ queue chooser); these
+    // just write/clear the widget snapshot the python side reads
+    function mcSetFrom(name, atSeconds) {
+        setWidget("motion_context_file", name);
         setWidget("motion_context_end_seconds",
-            newest.out > 0 ? Math.round(newest.out * 100) / 100 : 0);
-        return true;
+            atSeconds && atSeconds > 0 ? Math.round(atSeconds * 100) / 100 : 0);
+        // the context IS the opening — a stale first-frame thumbnail would lie
+        if (!inputConnected(node, "first_frame")
+            && String(widgetValue(node, "first_frame_file", "")).trim()) {
+            setWidget("first_frame_file", "");
+            setWidget("first_frame_crop", "");
+        }
+    }
+    function mcClearWidgets() {
+        if (String(widgetValue(node, "motion_context_file", "")).trim()) {
+            setWidget("motion_context_file", "");
+            setWidget("motion_context_end_seconds", 0);
+        }
+    }
+    // the old-way continuation parks the source clip in the video-ref slot;
+    // remember it, so choosing motion later can drop THAT ref (motion context
+    // replaces it — keeping both would double-condition) without ever touching
+    // refs the user added themselves
+    function mcDropContRef() {
+        const cont = node.properties?.h3_cont_ref;
+        if (!cont) return;
+        node.properties.h3_cont_ref = null;
+        const i = state.videoRefs.findIndex((v) => v.src?.type === "file" && v.src.name === cont);
+        if (i > -1) {
+            removeFileVideo(i);
+            toast("continuation video ref removed — the motion context replaces it");
+        }
     }
 
     function finalFrameToFirst(videoName, atSeconds) {
@@ -1498,15 +1502,11 @@ function attachTimeline(node) {
             toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph, then press ⏭ again", true);
             return;
         }
-        if (mcFollowOn() || String(widgetValue(node, "motion_context_file", "")).trim()) {
-            // plain ⏭ means "last frame → first" — a live context (or the
-            // follow toggle re-arming one at queue time) would silently
-            // override the very frame this button just set
-            node.properties = node.properties || {};
-            node.properties.h3_mc_follow = false;
-            setWidget("motion_context_file", "");
-            setWidget("motion_context_end_seconds", 0);
-            toast("⏭▶ motion continuation turned off — plain ⏭ continues from the still frame only");
+        if (String(widgetValue(node, "motion_context_file", "")).trim()) {
+            // ⏭ means "last frame → first" — a live motion context would
+            // silently override the very frame this button just set
+            mcClearWidgets();
+            toast("motion context cleared — ⏭ continues from the still frame only");
         }
         extractLastFrame(videoName, (fname) => {
             setWidget("first_frame_file", fname);
@@ -2756,12 +2756,8 @@ function attachTimeline(node) {
             }
             return img;
         };
-        queueBtn.addEventListener("click", async () => {
+        const doQueue = async () => {
             try {
-                // follow mode resolves its continuation source NOW: the reel's
-                // newest clip, out-trim included — "queue = continue the chain"
-                if (mcFollowOn() && !mcApplyFollow())
-                    toast("reel is empty — queuing plain (⏭▶ engages once a clip is in the reel)");
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
@@ -2774,6 +2770,131 @@ function attachTimeline(node) {
                 run.armed = false;
                 toast("queue failed: " + (e?.message || e), true);
             }
+        };
+
+        // the continuation choice happens HERE, at queue time: with a clip in
+        // the reel you're asked how this render should relate to it — plain,
+        // still-frame continuation, or motion continuation. Newest clip is the
+        // default source; a card's out-trim is honored either way.
+        function openQueueChooser() {
+            const list = reelGet();
+            const manual = String(widgetValue(node, "motion_context_file", "")).trim();
+            const manualInReel = manual && list.some((e) => e.name === manual);
+            openModal((root) => {
+                const panel = el("div", {
+                    background: COL.bg, border: `1px solid ${COL.border}`, borderRadius: "8px",
+                    display: "flex", flexDirection: "column", overflow: "hidden",
+                    fontFamily: "sans-serif", width: "min(560px, 92vw)",
+                });
+                const head = el("div", {
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "8px 12px", borderBottom: `1px solid ${COL.divider}`,
+                });
+                head.appendChild(el("span", { color: COL.bright, fontSize: "13px", flex: "1" },
+                    "Queue — continue from the reel?"));
+                const cancelB = el("button", btnStyle, "cancel");
+                cancelB.addEventListener("click", closeModal);
+                head.appendChild(cancelB);
+
+                const fromRow = el("div", {
+                    display: "flex", gap: "8px", alignItems: "center", padding: "10px 12px 2px",
+                });
+                fromRow.appendChild(el("span", { color: COL.text, fontSize: "12px" }, "from"));
+                const sel = document.createElement("select");
+                Object.assign(sel.style, {
+                    flex: "1", background: COL.input, color: COL.bright,
+                    border: `1px solid ${COL.border}`, borderRadius: "3px",
+                    fontSize: "12px", padding: "3px 6px",
+                });
+                for (let i = list.length - 1; i >= 0; i--) {   // newest first
+                    const e2 = list[i];
+                    const nm = e2.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                    const o = document.createElement("option");
+                    o.value = String(i);
+                    o.textContent = `${i + 1}. ${nm}`
+                        + (e2.out > 0 ? ` (out ${e2.out.toFixed(1)}s)` : "")
+                        + (i === list.length - 1 ? " — newest" : "");
+                    sel.appendChild(o);
+                }
+                if (manual && !manualInReel) {
+                    // a clip was hand-picked in the MOTION bar — keep it choosable
+                    const o = document.createElement("option");
+                    o.value = "picked";
+                    o.textContent = "picked: " + manual.replace(/\s*\[\w+\]\s*$/, "");
+                    sel.appendChild(o);
+                    sel.value = "picked";
+                } else {
+                    sel.value = String(list.length - 1);
+                }
+                fromRow.appendChild(sel);
+
+                const opts = el("div", {
+                    display: "flex", flexDirection: "column", gap: "8px", padding: "10px 12px 12px",
+                });
+                const chosen = () => (sel.value === "picked")
+                    ? { name: manual, out: Number(widgetValue(node, "motion_context_end_seconds", 0)) || 0 }
+                    : list[parseInt(sel.value, 10)];
+                const opt = (label, desc, color, fn) => {
+                    const b = el("button", {
+                        ...btnStyle, color, textAlign: "left", padding: "8px 12px",
+                        display: "flex", flexDirection: "column", gap: "2px",
+                    });
+                    b.appendChild(el("span", { fontSize: "13px" }, label));
+                    b.appendChild(el("span", { fontSize: "11px", color: COL.text }, desc));
+                    b.addEventListener("click", () => fn(chosen()));
+                    opts.appendChild(b);
+                };
+                opt("⏭▶ continue with motion", "the clip's tail frames + audio are pinned at "
+                    + "the new head — motion and the actual sound carry through the join "
+                    + "(costs extra rows; the repeated head auto-trims on the reel)",
+                    COL.green, (e2) => {
+                        closeModal();
+                        mcDropContRef();   // motion context replaces an old-way ref
+                        if (sel.value !== "picked")
+                            mcSetFrom(e2.name, e2.out > 0 ? e2.out : undefined);
+                        refresh(true);
+                        doQueue();
+                    });
+                opt("⏭ continue the classic way", "the clip's final kept frame becomes the "
+                    + "first frame AND the clip goes into the video-reference slot — "
+                    + "composition + look/momentum carry over, audio is imitated",
+                    COL.green, (e2) => {
+                        closeModal();
+                        mcClearWidgets();
+                        if (inputConnected(node, "first_frame")) {
+                            toast("the first_frame SOCKET is connected and wins over file inputs — disconnect it in the graph first", true);
+                            return;
+                        }
+                        extractLastFrame(e2.name, (fname) => {
+                            setWidget("first_frame_file", fname);
+                            setWidget("first_frame_crop", "");
+                            addFileVideo(e2.name);   // the momentum slot (swap-on-add)
+                            node.properties = node.properties || {};
+                            node.properties.h3_cont_ref = e2.name;
+                            refresh(true);
+                            const [oW, oH] = outWH();
+                            const meta = state.videoMeta.get(e2.name);
+                            if (meta && Math.abs(meta.w / meta.h - oW / oH) > 0.01)
+                                toast("heads-up: the clip's aspect differs from the output — ⛶ the first-frame card after this render", true);
+                            doQueue();
+                        }, e2.out > 0 ? e2.out : undefined);
+                    });
+                opt("▶ just render", "no continuation — render the setup exactly as it "
+                    + "stands (clears any motion context)",
+                    COL.bright, () => {
+                        closeModal();
+                        mcClearWidgets();
+                        refresh(true);
+                        doQueue();
+                    });
+                panel.append(head, fromRow, opts);
+                root.appendChild(panel);
+            }, () => {});
+        }
+
+        queueBtn.addEventListener("click", () => {
+            if (!reelGet().length) { doQueue(); return; }
+            openQueueChooser();
         });
 
         const onExecStart = ({ detail }) => {
@@ -3067,38 +3188,16 @@ function attachTimeline(node) {
             fill();
         };
         for (const f of [mcFrames, mcAudio, mcEnd]) f.addEventListener("blur", commitMc);
-        const mcFollowB = el("button", btnStyle, "⏭▶ continue the reel");
-        mcFollowB.title = "when ON, every ▶ queue continues WITH MOTION from the reel's newest clip (its out-trim respected, resolved at queue time): tail frames + audio are pinned so motion and sound carry through the join. The loop: render → 🎞 add to reel → queue again.";
-        mcFollowB.addEventListener("click", () => {
-            node.properties = node.properties || {};
-            const on = !node.properties.h3_mc_follow;
-            node.properties.h3_mc_follow = on;
-            if (on) {
-                const armed = mcApplyFollow();
-                toast(armed
-                    ? "⏭▶ ON — every queue now continues the reel's newest clip with motion + audio"
-                    : "⏭▶ ON — engages at queue time once a clip is in the reel");
-            } else {
-                setWidget("motion_context_file", "");
-                setWidget("motion_context_end_seconds", 0);
-                toast("⏭▶ off — queues render independently again");
-            }
-            refresh(true);
-        });
         const mcPick = el("button", btnStyle, "pick clip…");
-        mcPick.title = "continue WITH MOTION from a specific video instead of the reel's newest (output tab = previous renders) — turns the follow toggle off";
+        mcPick.title = "continue WITH MOTION from a specific video that isn't in the reel (output tab = previous renders) — the ▶ queue chooser offers it as the 'picked' source";
         mcPick.addEventListener("click", () => openVideoPicker((n) => {
-            node.properties = node.properties || {};
-            node.properties.h3_mc_follow = false;   // explicit source wins
             setWidget("motion_context_file", n);
             setWidget("motion_context_end_seconds", 0);   // new clip, old cut point is meaningless
             refresh(true);
         }));
         const mcClear = el("button", { ...btnStyle, color: COL.red, padding: "1px 7px" }, "✕");
-        mcClear.title = "stop continuing with motion (joins go back to plain cuts / still-frame continuation)";
+        mcClear.title = "clear the motion context (the next queue's chooser decides again)";
         mcClear.addEventListener("click", () => {
-            node.properties = node.properties || {};
-            node.properties.h3_mc_follow = false;
             setWidget("motion_context_file", "");
             setWidget("motion_context_end_seconds", 0);
             refresh(true);
@@ -3108,7 +3207,7 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "audio"), mcAudio,
             el("span", { color: COL.text, fontSize: "11px" }, "end"), mcEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            mcFollowB, mcPick, mcClear);
+            mcPick, mcClear);
 
         // ---- motion path: Ken Burns through the model -----------------------
         // Two windows (A=start, B=end) over one image; the chosen curve places
@@ -4050,10 +4149,10 @@ function attachTimeline(node) {
             list.pop();
             reelSet(list);
             try {
-                // the popped clip is gone, so follow mode re-resolves to the one
-                // BEFORE it — a re-roll continues from the same source its
-                // predecessor did, which is exactly what a retake means
-                if (mcFollowOn()) mcApplyFollow();
+                // widgets still hold whatever the popped clip's queue chose
+                // (context file, extracted first frame, continuation ref) — a
+                // re-roll is a retake, so re-queueing that setup verbatim
+                // continues from the same source the reject did
                 run.armed = true;
                 run.mcSpan = mcSpanFrames();
                 await app.queuePrompt(0);
@@ -5362,35 +5461,20 @@ function attachTimeline(node) {
             }
             {
                 const mf = String(widgetValue(node, "motion_context_file", "")).trim();
-                const follow = mcFollowOn();
-                const newest = reelGet().slice(-1)[0];
-                mcFollowB.style.color = follow ? COL.green : COL.bright;
-                mcFollowB.style.borderColor = follow ? COL.green : COL.border;
-                if (follow) {
-                    mcLabel.textContent = newest
-                        ? "follows the reel → " + newest.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop()
-                            + (newest.out > 0 ? ` (out ${newest.out.toFixed(1)}s)` : "")
-                        : "follows the reel — empty, queues run plain until a clip is added";
-                    mcLabel.style.color = newest ? COL.green : COL.mid;
-                } else {
-                    mcLabel.textContent = mf ? mf.replace(/\s*\[\w+\]\s*$/, "")
-                        : "off — joins re-decide motion from a still";
-                    mcLabel.style.color = mf ? COL.green : COL.text;
-                }
-                mcClear.style.display = (mf || follow) ? "" : "none";
+                mcLabel.textContent = mf ? mf.replace(/\s*\[\w+\]\s*$/, "")
+                    : "off — the ▶ queue button asks when a clip is in the reel";
+                mcLabel.style.color = mf ? COL.green : COL.text;
+                mcClear.style.display = mf ? "" : "none";
                 const nF = Math.max(1, Number(widgetValue(node, "motion_context_frames", 22)) || 22);
                 if (document.activeElement !== mcFrames) mcFrames.value = String(nF);
                 if (document.activeElement !== mcAudio)
                     mcAudio.value = String(Math.max(0, Number(widgetValue(node, "motion_context_audio_frames", 22)) || 0));
                 if (document.activeElement !== mcEnd)
                     mcEnd.value = String(Number(widgetValue(node, "motion_context_end_seconds", 0)) || 0);
-                mcFrames.disabled = mcAudio.disabled = !mf && !follow;
-                // in follow mode the cut point IS the reel card's out-trim —
-                // hand-editing it here would be overwritten at queue time
-                mcEnd.disabled = !mf || follow;
-                mcEnd.title = follow
-                    ? "follow mode: the cut point comes from the reel card's out-trim (✂ the card to change it)"
-                    : "continue from this moment of the context clip, in seconds (0 = its end)";
+                // frames/audio are preferences for the NEXT motion continuation —
+                // editable ahead of time; the cut point only means something
+                // once a context clip is set
+                mcEnd.disabled = !mf;
                 mcNote.style.display = mf ? "" : "none";
                 if (mf) {
                     const span = mcSpanFrames();

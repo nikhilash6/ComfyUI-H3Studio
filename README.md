@@ -607,12 +607,14 @@ source is connected or named, with the file picker and the seconds range inline.
 
 ## Motion context (⏭▶) — joins with real continuity
 
-Plain ⏭ chaining hands the next clip a still frame: pixel continuity, but the
+Classic chaining hands the next clip a still frame: pixel continuity, but the
 model re-decides instantaneous motion from a standing start, and reference
-audio is only ever *imitated* — a cover band, not the same recording. Turning
-on **⏭▶ continue the reel** (in the editor's MOTION bar) fixes both at once —
-from then on every ▶ queue continues from the **reel's newest clip, resolved
-at queue time**:
+audio is only ever *imitated* — a cover band, not the same recording. With a
+clip in the reel, **▶ queue opens a chooser**: continue **with motion**,
+continue **the classic way** (final frame → first frame *and* the clip into
+the video-reference slot), or just render — from any reel clip, **newest by
+default**, a trimmed card continuing from its OUT point. The motion option
+fixes both problems at once:
 
 - The previous clip's **tail frames** (default 22) are encoded in **one VAE
   call** and pinned at the new clip's head **on its own timeline** — one
@@ -628,10 +630,12 @@ at queue time**:
 
 Practicalities:
 
-- The chaining loop is *render → 🎞 add to reel → queue again*. A trimmed
-  card is continued from its **OUT point**; **🎲 re-roll** continues from the
-  clip before the one it replaces (a retake, from the same source). **pick
-  clip…** continues from a specific file instead and turns the toggle off.
+- The chaining loop is *queue → choose → render → 🎞 add to reel → queue
+  again*. **🎲 re-roll** retakes with the same choice and source. Choosing
+  motion removes a classic-continuation video ref the chooser added earlier
+  (they'd double-condition); refs you added yourself are never touched.
+  **pick clip…** in the MOTION bar offers a file outside the reel as the
+  chooser's "picked" source.
 - The render **opens by repeating the pinned tail** (~0.92 s at 22 frames).
   **🎞 add to reel** sets the new card's in-trim automatically, so an export
   never duplicates the join — non-destructive, adjust it on the card if you
