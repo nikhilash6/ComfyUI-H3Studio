@@ -2798,11 +2798,14 @@ function attachTimeline(node) {
                     reelAdd(name);
                     if (renderedSpan > 0) {
                         // this render opens with the pinned context head — trim it
-                        // non-destructively so a later export never duplicates it
+                        // non-destructively so a later export never duplicates it,
+                        // and mark it so export luma-matches the join (the first
+                        // generated frames zigzag ~8% bright / ~10% dark)
                         const l = reelGet();
                         const e2 = l[l.length - 1];
-                        if (e2?.name === name && !(e2.in > 0)) {
-                            e2.in = renderedSpan / FPS;
+                        if (e2?.name === name) {
+                            e2.mc = true;
+                            if (!(e2.in > 0)) e2.in = renderedSpan / FPS;
                             reelSet(l);
                             toast(`added — in-trim auto-set to ${(renderedSpan / FPS).toFixed(2)}s `
                                 + `to drop the repeated context head (adjust on the card if you like)`);
@@ -3781,7 +3784,7 @@ function attachTimeline(node) {
             const entry0 = reelGet()[index];
             if (!entry0) return;
             const name = entry0.name;
-            const cur = { in: entry0.in || 0, out: entry0.out || 0 };
+            const cur = { in: entry0.in || 0, out: entry0.out || 0, mc: !!entry0.mc };
             const vv = document.createElement("video");
             vv.preload = "auto";
             vv.volume = 0.5;
@@ -3791,7 +3794,7 @@ function attachTimeline(node) {
                 let i = index;
                 if (l[i]?.name !== name) i = l.findIndex((e) => e.name === name);
                 if (i < 0) return;
-                l[i] = { ...l[i], in: cur.in, out: cur.out };
+                l[i] = { ...l[i], in: cur.in, out: cur.out, mc: cur.mc };
                 reelSet(l);   // re-renders the reel row (this modal is separate DOM)
             };
             openModal((root) => {
@@ -3845,8 +3848,16 @@ function attachTimeline(node) {
                 const inB = el("button", btnStyle, "⟦ in here");
                 const outB = el("button", btnStyle, "out here ⟧");
                 const wholeB = el("button", btnStyle, "whole clip");
+                const lmWrap = el("label", { display: "flex", gap: "5px", alignItems: "center",
+                    fontSize: "11px", color: COL.text, cursor: "pointer" });
+                const lmCb = el("input");
+                lmCb.type = "checkbox";
+                lmCb.checked = cur.mc;
+                lmWrap.title = "at export, gain-correct this clip's first half-second toward the previous clip's closing brightness — fixes the tiny flash where a ⏭▶ motion continuation takes over (set automatically when a motion render is 🎞-added; harmless on normal cuts, but usually wanted only on continuation joins)";
+                lmCb.addEventListener("change", () => { cur.mc = lmCb.checked; commit(); });
+                lmWrap.append(lmCb, el("span", null, "✨ luma-match join"));
                 const readout = el("span", { color: COL.text, fontSize: "12px", flex: "1" });
-                bar.append(playB, inB, outB, wholeB, readout);
+                bar.append(playB, inB, outB, wholeB, lmWrap, readout);
                 panel.append(head, vv, strip2, bar);
                 root.appendChild(panel);
 
@@ -4281,7 +4292,7 @@ function attachTimeline(node) {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         clips: list.map((e) => ({ name: e.name, in: e.in || 0,
-                            out: e.out || 0, xfade: e.xfade || 0 })),
+                            out: e.out || 0, xfade: e.xfade || 0, mc: !!e.mc })),
                         fade_in: fx.fadeIn || 0,
                         fade_out: fx.fadeOut || 0,
                         fps: FPS,

@@ -60,6 +60,34 @@ def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
     return wf
 
 
+def _luma_match(prev_f, next_f, frames=12, lo=0.82, hi=1.22):
+    """Flatten the brightness zigzag at a motion-continuation join.
+
+    The model's first generated frames after a pinned context block run ~8%
+    bright for a frame, then ~10% dark, before converging (measured) -- a
+    visible flash on a hard cut. Gain-correct next_f's first `frames` frames
+    toward the previous clip's closing level, the correction decaying linearly
+    to zero so a legitimate lighting change survives. Export-time only; the
+    render file is untouched.
+    """
+    anchor = float(prev_f[-4:].mean())
+    n = min(frames, next_f.shape[0])
+    gains = []
+    for k in range(n):
+        mk = float(next_f[k].mean())
+        if mk <= 1e-4 or anchor <= 1e-4:
+            continue
+        g = max(lo, min(hi, anchor / mk))
+        w = 1.0 - k / float(frames)
+        gk = 1.0 + (g - 1.0) * w
+        next_f[k] = (next_f[k] * gk).clamp(0.0, 1.0)
+        gains.append(gk)
+    if gains:
+        logging.info("MiniMaxH3Guide: reel join luma-matched over %d frame(s), "
+                     "gain %.3f..%.3f", len(gains), min(gains), max(gains))
+    return next_f
+
+
 def _declick(wf, sr, head=False, tail=False):
     n = min(int(sr * 0.015), max(1, wf.shape[-1] // 4))
     if n > 1:
@@ -136,6 +164,8 @@ def register():
                     "frames": fsel,
                     "audio": _clip_audio(audio, i0, i1 - i0, fps, sr, channels),
                     "xfade": max(0.0, float(c.get("xfade") or 0.0)),
+                    # motion-continuation clips get their join brightness matched
+                    "lumafix": bool(c.get("mc")),
                 })
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
@@ -165,6 +195,8 @@ def register():
                         + a[..., :xs] * torch.sin(ta * math.pi / 2))
                 out_a = torch.cat([out_a[..., :-xs], a_bl, a[..., xs:]], dim=-1)
             else:
+                if p.get("lumafix"):
+                    f = _luma_match(out_f, f)
                 _declick(out_a, sr, tail=True)
                 _declick(a, sr, head=True)
                 out_f = torch.cat([out_f, f], dim=0)
