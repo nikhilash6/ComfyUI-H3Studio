@@ -3936,7 +3936,7 @@ function attachTimeline(node) {
                     reelRow.appendChild(joint);
                 }
                 const c = el("div", {
-                    width: "172px", flex: "0 0 auto", background: COL.panel,
+                    width: "216px", flex: "0 0 auto", background: COL.panel,
                     border: `1px solid ${COL.border}`, borderRadius: "6px",
                     overflow: "hidden",
                 });
@@ -3945,7 +3945,7 @@ function attachTimeline(node) {
                 const vv = el("video");
                 vv.muted = true; vv.preload = "metadata"; vv.controls = true;
                 vv.src = inputFileUrl(entry.name);
-                Object.assign(vv.style, { width: "172px", height: "96px",
+                Object.assign(vv.style, { width: "216px", height: "121px",
                     objectFit: "cover", background: "#222", display: "block" });
                 // preview honors the trim: playback loops inside [in, out]
                 vv.addEventListener("play", () => {
