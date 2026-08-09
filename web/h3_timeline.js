@@ -2458,7 +2458,7 @@ function attachTimeline(node) {
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
-        const run = { armed: false, pid: null, previewURL: null };
+        const run = { armed: false, pid: null, live: false, previewURL: null };
         const qWrap = el("span", { display: "none", alignItems: "center", gap: "6px" });
         const qBar = el("div", {
             width: "110px", height: "6px", background: "#2a2a2a",
@@ -2574,6 +2574,7 @@ function attachTimeline(node) {
         });
 
         const onExecStart = ({ detail }) => {
+            run.live = true;
             if (run.armed) { run.pid = detail?.prompt_id ?? null; run.armed = false; }
         };
         const onProgress = ({ detail }) => {
@@ -2584,9 +2585,13 @@ function attachTimeline(node) {
             qText.textContent = `step ${detail.value}/${detail.max}`;
         };
         const onPreview = ({ detail }) => {
-            // b_preview carries no prompt id — only show while OUR run is live
-            if (run.pid === null || !(detail instanceof Blob)) return;
-            setPreviewFrame(detail);
+            // b_preview carries no prompt id — show whenever ANY run is live and
+            // the editor is open (gating on our own queue button dropped previews
+            // for runs queued from the main UI)
+            const blob = detail instanceof Blob ? detail
+                : (detail?.blob instanceof Blob ? detail.blob : null);
+            if (!blob || !run.live) return;
+            setPreviewFrame(blob);
         };
         const onExecuted = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
@@ -2599,12 +2604,14 @@ function attachTimeline(node) {
             qFill.style.width = "100%";
             setTimeout(() => { qWrap.style.display = "none"; }, 2500);
             run.pid = null;
+            run.live = false;
         };
         const onExecError = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
             qText.textContent = "failed — see the graph";
             qFill.style.background = COL.red;
             run.pid = null;
+            run.live = false;
         };
         const apiEvents = [["execution_start", onExecStart], ["progress", onProgress],
             ["b_preview", onPreview], ["executed", onExecuted],
