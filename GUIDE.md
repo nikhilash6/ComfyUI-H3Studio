@@ -63,6 +63,9 @@ Hit **▶ queue**: a progress strip appears in the header, the sampling preview 
 ### I want to chain clips into one long video (and cut it)
 Add renders to the **REEL** strip with the result dock's **🎞 add to reel**; **▶ queue** then asks how the next render continues the chain (see the recipe above). **▶ play reel** previews the whole chain in place — trims respected, joins as hard cuts (crossfades/fades/luma-match are export-only), looping until you close it. Click a card's **✂ readout** to trim it in a **big popup view** — full-size preview, draggable in/out handles, the kept range loops as it plays. The **⧉ dial between cards** sets a crossfade, and **fade in / out** on the header bookend the whole piece. Nothing is baked: every trim, crossfade and fade stays editable and only applies at **⇧ export as one video** — a single mp4 (equal-power audio blends, de-clicked cuts) in `output/h3reel/`, no external tools. **⏭** on a card continues from its OUT point without queueing; **🎲 re-roll last** replaces the newest take.
 
+### I want to fix an earlier clip in the chain
+Every render added to the reel **remembers the full setup that made it**. Click **⚙** on the card (twice — it replaces your current editor setup), tweak whatever was wrong, and **▶ queue**: the continuation chooser pre-selects the clip *before* it as the source (a retake continues from the same place the original did), and when the render lands the dock offers **🎞 replace clip N** — position, crossfade kept, trims reset to fit the new take. If later clips were motion-continued from the old take, the toast reminds you to re-render them in order.
+
 ### I want to save my whole setup
 **💾 save setup** → JSON with everything (prompt, frames, refs, framings, strengths). **📂 load setup** restores it on any fresh node — it tells you if a socket-fed input can't travel.
 

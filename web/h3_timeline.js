@@ -451,6 +451,7 @@ function attachTimeline(node) {
         videoRefs: [], videoRefsAuto: true, videoMeta: new Map(),
         firstCrop: null, lastCrop: null, midCrops: [], refCrops: [], videoCrops: [],
         sel: null,           // {kind:'first'|'last'|'mid'|'beat'|'ref', i?}
+        reelTarget: null,    // {idx, name} armed by a reel card's ⚙ — offer replace
         drag: null, syncing: false, specError: null,
         thumbTry: 0, thumbTimer: null,
         imgCache: new Map(),
@@ -1631,16 +1632,18 @@ function attachTimeline(node) {
     }
 
     // ---- setup save/load --------------------------------------------------
-    function exportSetup() {
+    // one snapshot = the full conditioning recipe, reusable by the setup file
+    // AND by reel entries (each clip remembers how it was made)
+    function captureSetupFields() {
         const fields = {};
         for (const f of SETUP_FIELDS) {
             const w = getWidget(node, f);
             if (w) fields[f] = w.value;
         }
-        const setup = {
+        return {
             format: SETUP_FORMAT, version: SETUP_VERSION,
-            // socket inputs can't travel in a file — record them so the loader can
-            // say what a resumed setup is still missing
+            // socket inputs can't travel in a snapshot — record them so the
+            // loader can say what a resumed setup is still missing
             sockets: {
                 first: inputConnected(node, "first_frame"),
                 last: inputConnected(node, "last_frame"),
@@ -1650,6 +1653,30 @@ function attachTimeline(node) {
             },
             fields,
         };
+    }
+
+    function applySetupFields(setup) {
+        for (const f of SETUP_FIELDS) {
+            if (f in setup.fields) setWidget(f, setup.fields[f]);
+            else if (f in SETUP_DEFAULTS) setWidget(f, SETUP_DEFAULTS[f]);
+        }
+        refresh(true);
+        // honest resume report: what the snapshot expected that this graph lacks
+        const s = setup.sockets || {};
+        const missing = [];
+        if (s.first && !inputConnected(node, "first_frame")) missing.push("first_frame socket");
+        if (s.last && !inputConnected(node, "last_frame")) missing.push("last_frame socket");
+        const midNow = connectedSlots(node, "middle_frame_").map((x) => x.slot);
+        for (const sl of s.mids || []) if (!midNow.includes(sl)) missing.push(`middle_frame_${sl}`);
+        const refNow = connectedSlots(node, "ref_image_").map((x) => x.slot);
+        for (const sl of s.refs || []) if (!refNow.includes(sl)) missing.push(`ref_image_${sl}`);
+        const audNow = connectedSlots(node, "ref_audio_").map((x) => x.slot);
+        for (const sl of s.audios || []) if (!audNow.includes(sl)) missing.push(`ref_audio_${sl}`);
+        return missing;
+    }
+
+    function exportSetup() {
+        const setup = captureSetupFields();
         const blob = new Blob([JSON.stringify(setup, null, 2)], { type: "application/json" });
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
@@ -1666,22 +1693,7 @@ function attachTimeline(node) {
         if (setup?.format !== SETUP_FORMAT || !setup.fields) {
             toast("not an H3 setup file", true); return;
         }
-        for (const f of SETUP_FIELDS) {
-            if (f in setup.fields) setWidget(f, setup.fields[f]);
-            else if (f in SETUP_DEFAULTS) setWidget(f, SETUP_DEFAULTS[f]);
-        }
-        refresh(true);
-        // honest resume report: what the file expected that this graph doesn't have
-        const s = setup.sockets || {};
-        const missing = [];
-        if (s.first && !inputConnected(node, "first_frame")) missing.push("first_frame socket");
-        if (s.last && !inputConnected(node, "last_frame")) missing.push("last_frame socket");
-        const midNow = connectedSlots(node, "middle_frame_").map((x) => x.slot);
-        for (const sl of s.mids || []) if (!midNow.includes(sl)) missing.push(`middle_frame_${sl}`);
-        const refNow = connectedSlots(node, "ref_image_").map((x) => x.slot);
-        for (const sl of s.refs || []) if (!refNow.includes(sl)) missing.push(`ref_image_${sl}`);
-        const audNow = connectedSlots(node, "ref_audio_").map((x) => x.slot);
-        for (const sl of s.audios || []) if (!audNow.includes(sl)) missing.push(`ref_audio_${sl}`);
+        const missing = applySetupFields(setup);
         toast(missing.length
             ? "setup loaded — but it used sockets not connected here: " + missing.join(", ")
             : "setup loaded", missing.length > 0);
@@ -2661,7 +2673,8 @@ function attachTimeline(node) {
         const queueBtn = el("button", { ...btnStyle, color: COL.green }, "▶ queue");
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
-        const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0 };
+        const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0,
+            setup: null, replaceTarget: null };
         const qWrap = el("span", { display: "none", alignItems: "center", gap: "6px" });
         const qBar = el("div", {
             width: "110px", height: "6px", background: "#2a2a2a",
@@ -2811,29 +2824,63 @@ function attachTimeline(node) {
                 const refB = el("button", { ...btnStyle, fontSize: "11px" }, "+ as video ref");
                 refB.title = "carry this clip's motion and sound into the next one as a reference video";
                 refB.addEventListener("click", () => addFileVideo(name));
+                const runSetup = run.setup;   // snapshot captured at queue time
+                const target = run.replaceTarget;
                 const reelB = el("button", { ...btnStyle, fontSize: "11px" }, "🎞 add to reel");
-                reelB.title = "append this clip to the chain at the bottom";
+                reelB.title = "append this clip to the chain at the bottom (it carries the setup that made it — ⚙ on its card brings that back)";
                 reelB.addEventListener("click", () => {
                     reelAdd(name);
-                    if (renderedSpan > 0) {
-                        // this render opens with the pinned context head — trim it
-                        // non-destructively so a later export never duplicates it,
-                        // and mark it so export luma-matches the join (the first
-                        // generated frames zigzag ~8% bright / ~10% dark)
-                        const l = reelGet();
-                        const e2 = l[l.length - 1];
-                        if (e2?.name === name) {
+                    const l = reelGet();
+                    const e2 = l[l.length - 1];
+                    if (e2?.name === name) {
+                        if (runSetup) e2.setup = runSetup;   // the clip remembers its recipe
+                        if (renderedSpan > 0) {
+                            // the render opens with the pinned context head — trim
+                            // it non-destructively and mark for join luma-match
                             e2.mc = true;
                             if (!(e2.in > 0)) e2.in = renderedSpan / FPS;
-                            reelSet(l);
+                        }
+                        reelSet(l);
+                        if (renderedSpan > 0)
                             toast(`added — in-trim auto-set to ${(renderedSpan / FPS).toFixed(2)}s `
                                 + `to drop the repeated context head (adjust on the card if you like)`);
-                        }
                     }
+                    state.reelTarget = null;   // adding as new consumes the replace intent
                     reelB.textContent = "✓ in reel";
                     reelB.disabled = true;
                 });
-                resFoot.append(chainB, refB, reelB);
+                // ⚙-armed retake: offer to swap this render into the original card
+                let repB = null;
+                const findTarget = () => {
+                    if (!target) return -1;
+                    const l = reelGet();
+                    if (l[target.idx]?.name === target.name) return target.idx;
+                    return l.findIndex((e) => e.name === target.name);
+                };
+                const tIdx = findTarget();
+                if (tIdx > -1) {
+                    repB = el("button", { ...btnStyle, color: COL.green, fontSize: "11px" },
+                        `🎞 replace clip ${tIdx + 1}`);
+                    repB.title = "swap this render into the reel card whose setup you loaded — keeps its position and crossfade; trims reset to fit the new take";
+                    repB.addEventListener("click", () => {
+                        const i = findTarget();
+                        if (i < 0) { toast("that reel card is gone — use add to reel instead", true); return; }
+                        const l = reelGet();
+                        l[i] = { ...l[i], name, setup: runSetup || l[i].setup,
+                            mc: renderedSpan > 0,
+                            in: renderedSpan > 0 ? renderedSpan / FPS : 0, out: 0 };
+                        reelSet(l);
+                        state.reelTarget = null;
+                        repB.textContent = "✓ replaced";
+                        repB.disabled = true;
+                        reelB.disabled = true;
+                        toast(`clip ${i + 1} replaced with the new take`
+                            + (i < l.length - 1
+                                ? " — later clips were continued from the OLD take; re-render them in order if the joins matter"
+                                : ""), i < l.length - 1);
+                    });
+                }
+                resFoot.append(chainB, refB, ...(repB ? [repB] : []), reelB);
                 if (renderedSpan > 0)
                     resFoot.append(el("span", {
                         color: COL.text, fontSize: "10px", flexBasis: "100%",
@@ -2873,6 +2920,8 @@ function attachTimeline(node) {
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
+                run.setup = captureSetupFields();   // the reel remembers how each clip was made
+                run.replaceTarget = state.reelTarget || null;   // armed by a card's ⚙
                 saveRes();   // a res you actually rendered at is the one worth remembering
                 await app.queuePrompt(0);
                 qWrap.style.display = "inline-flex";
@@ -2938,7 +2987,13 @@ function attachTimeline(node) {
                     sel.appendChild(o);
                     sel.value = "picked";
                 } else {
-                    sel.value = String(list.length - 1);
+                    // retaking clip N (⚙ armed)? it should continue from the clip
+                    // BEFORE it, exactly like the original take did — not from the
+                    // newest card, which may be N itself or later
+                    const t = state.reelTarget;
+                    const ti = t ? (list[t.idx]?.name === t.name ? t.idx
+                        : list.findIndex((e) => e.name === t.name)) : -1;
+                    sel.value = ti > 0 ? String(ti - 1) : String(list.length - 1);
                 }
                 fromRow.appendChild(sel);
 
@@ -4592,6 +4647,27 @@ function attachTimeline(node) {
                         COL.green),
                     mk("🎥", "add this clip as a reference video — its motion, look and sound condition the next render",
                         () => addFileVideo(entry.name), COL.green),
+                    mk("⚙", entry.setup
+                        ? "load this clip's full setup (prompt, refs, framings, strengths, context) back into the editor — tweak it and the render dock will offer to REPLACE this card with the new take"
+                        : "no setup stored on this clip (it was rendered before setup memory existed)",
+                        (ev) => {
+                            if (!entry.setup) { toast("no setup stored on this clip — clips remember their setup from now on", true); return; }
+                            const b = ev.currentTarget;
+                            if (b.dataset.confirm !== "1") {
+                                b.dataset.confirm = "1";
+                                b.style.color = COL.mid;
+                                setTimeout(() => { delete b.dataset.confirm; b.style.color = COL.bright; }, 1800);
+                                toast(`click ⚙ again to load clip ${i + 1}'s setup — this replaces the current editor setup`);
+                                return;
+                            }
+                            delete b.dataset.confirm;
+                            const missing = applySetupFields(entry.setup);
+                            state.reelTarget = { idx: i, name: entry.name };
+                            toast(`clip ${i + 1}'s setup loaded — tweak and ▶ queue; the render dock will offer to replace the card`
+                                + (missing.length ? ` (missing sockets: ${missing.join(", ")})` : ""),
+                                missing.length > 0);
+                        },
+                        entry.setup ? COL.bright : "#555"),
                     mk("✕", "remove from the chain (the file stays on disk)", () => {
                         const l = reelGet();
                         l.splice(i, 1);
