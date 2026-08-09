@@ -52,6 +52,9 @@ Use **H3 Frame Range → H3 Video To Latent → KSampler → H3 Splice** — rec
 ### I want to see the render without leaving the editor
 Hit **▶ queue**: a progress strip appears in the header, the sampling preview streams into a corner dock, and when it finishes the clip **plays right there** — with **⏭ last frame → first** and **+ as video ref** buttons to chain straight into the next shot.
 
+### I want to chain clips into one long video
+Every **⏭ continue** docks the source clip into the **REEL** strip at the bottom, and each new render joins it. Reorder with ◀▶, **⏭** any clip to branch from it, **🎲 re-roll last** to replace the newest take, then **⇧ export as one video** — the chain stitches into a single mp4 (sample-accurate audio, de-clicked joins) in `output/h3reel/`, no external tools.
+
 ### I want to save my whole setup
 **💾 save setup** → JSON with everything (prompt, frames, refs, framings, strengths). **📂 load setup** restores it on any fresh node — it tells you if a socket-fed input can't travel.
 
