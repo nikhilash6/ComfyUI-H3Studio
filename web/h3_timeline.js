@@ -2491,12 +2491,26 @@ function attachTimeline(node) {
 
         const dockSize = node.properties?.h3_dock || {};
         const resPanel = el("div", {
-            position: "absolute", right: "18px", bottom: "54px", zIndex: "5",
+            position: "absolute", zIndex: "5",
             width: (dockSize.w || 520) + "px", background: COL.panel,
             border: `1px solid ${COL.border}`,
             borderRadius: "8px", overflow: "hidden", display: "none",
             boxShadow: "0 10px 36px rgba(0,0,0,0.65)",
         });
+        // dragged before? restore left/top (clamped on-screen); else corner-dock
+        if (Number.isFinite(dockSize.l) && Number.isFinite(dockSize.t)) {
+            resPanel.style.left = Math.max(0, Math.min(window.innerWidth - 320, dockSize.l)) + "px";
+            resPanel.style.top = Math.max(0, Math.min(window.innerHeight - 160, dockSize.t)) + "px";
+        } else {
+            resPanel.style.right = "18px";
+            resPanel.style.bottom = "54px";
+        }
+        const dockSave = () => {
+            const r = resPanel.getBoundingClientRect();
+            node.properties = node.properties || {};
+            node.properties.h3_dock = { w: Math.round(r.width),
+                ...(resPanel.style.left ? { l: Math.round(r.left), t: Math.round(r.top) } : {}) };
+        };
         const resHead = el("div", {
             display: "flex", alignItems: "center", gap: "8px",
             padding: "6px 10px", borderBottom: `1px solid ${COL.divider}`,
@@ -2509,22 +2523,45 @@ function attachTimeline(node) {
             resGrip.setPointerCapture(ev.pointerId);
             const w0 = resPanel.getBoundingClientRect().width;
             const x0 = ev.clientX;
+            const leftAnchored = !!resPanel.style.left;
             const move = (e2) => {
-                // anchored right: dragging LEFT grows the panel
-                const w = Math.min(window.innerWidth - 60,
-                    Math.max(280, w0 + (x0 - e2.clientX)));
+                // right-docked: dragging LEFT grows; once moved (left-anchored),
+                // dragging RIGHT grows — always "away from the panel"
+                const d = leftAnchored ? (e2.clientX - x0) : (x0 - e2.clientX);
+                const w = Math.min(window.innerWidth - 60, Math.max(280, w0 + d));
                 resPanel.style.width = w + "px";
             };
             const up = (e2) => {
                 resGrip.removeEventListener("pointermove", move);
                 resGrip.removeEventListener("pointerup", up);
-                node.properties = node.properties || {};
-                node.properties.h3_dock = { w: Math.round(resPanel.getBoundingClientRect().width) };
+                dockSave();
             };
             resGrip.addEventListener("pointermove", move);
             resGrip.addEventListener("pointerup", up);
         });
         resHead.appendChild(resGrip);
+        resHead.style.cursor = "move";
+        resHead.addEventListener("pointerdown", (ev) => {
+            if (ev.target !== resHead && ev.target !== resTitle) return;   // buttons/grip keep their jobs
+            ev.preventDefault();
+            resHead.setPointerCapture(ev.pointerId);
+            const r0 = resPanel.getBoundingClientRect();
+            const dx = ev.clientX - r0.left, dy = ev.clientY - r0.top;
+            const move = (e2) => {
+                resPanel.style.right = resPanel.style.bottom = "";
+                resPanel.style.left = Math.max(0, Math.min(window.innerWidth - r0.width,
+                    e2.clientX - dx)) + "px";
+                resPanel.style.top = Math.max(0, Math.min(window.innerHeight - 60,
+                    e2.clientY - dy)) + "px";
+            };
+            const up = () => {
+                resHead.removeEventListener("pointermove", move);
+                resHead.removeEventListener("pointerup", up);
+                dockSave();
+            };
+            resHead.addEventListener("pointermove", move);
+            resHead.addEventListener("pointerup", up);
+        });
         const resTitle = el("span", { color: COL.bright, fontSize: "12px", flex: "1" }, "");
         const resClose = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "✕");
         resClose.addEventListener("click", () => { resPanel.style.display = "none"; });
