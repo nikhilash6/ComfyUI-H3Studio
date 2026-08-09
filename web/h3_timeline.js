@@ -2821,6 +2821,7 @@ function attachTimeline(node) {
                 toast("queued — progress and the result will show right here");
             } catch (e) {
                 run.armed = false;
+                console.error("[h3guide] queue failed", e);
                 toast("queue failed: " + (e?.message || e), true);
             }
         };
@@ -2894,7 +2895,15 @@ function attachTimeline(node) {
                     });
                     b.appendChild(el("span", { fontSize: "13px" }, label));
                     b.appendChild(el("span", { fontSize: "11px", color: COL.text }, desc));
-                    b.addEventListener("click", () => fn(chosen()));
+                    b.addEventListener("click", () => {
+                        // a silent handler death here looked like "nothing
+                        // happens" — whatever breaks, say so
+                        try { fn(chosen()); }
+                        catch (e) {
+                            console.error("[h3guide] queue choice failed", e);
+                            toast("queue choice failed: " + (e?.message || e), true);
+                        }
+                    });
                     opts.appendChild(b);
                 };
                 opt("⏭▶ continue with motion", "the clip's tail frames + audio are pinned at "
@@ -2919,16 +2928,22 @@ function attachTimeline(node) {
                             return;
                         }
                         extractLastFrame(e2.name, (fname) => {
-                            setWidget("first_frame_file", fname);
-                            setWidget("first_frame_crop", "");
-                            addFileVideo(e2.name);   // the momentum slot (swap-on-add)
-                            node.properties = node.properties || {};
-                            node.properties.h3_cont_ref = e2.name;
-                            refresh(true);
-                            const [oW, oH] = outWH();
-                            const meta = state.videoMeta.get(e2.name);
-                            if (meta && Math.abs(meta.w / meta.h - oW / oH) > 0.01)
-                                toast("heads-up: the clip's aspect differs from the output — ⛶ the first-frame card after this render", true);
+                            try {
+                                setWidget("first_frame_file", fname);
+                                setWidget("first_frame_crop", "");
+                                addFileVideo(e2.name);   // the momentum slot (swap-on-add)
+                                node.properties = node.properties || {};
+                                node.properties.h3_cont_ref = e2.name;
+                                refresh(true);
+                                const [oW, oH] = outWH();
+                                const meta = state.videoMeta.get(e2.name);
+                                if (meta && Math.abs(meta.w / meta.h - oW / oH) > 0.01)
+                                    toast("heads-up: the clip's aspect differs from the output — ⛶ the first-frame card after this render", true);
+                            } catch (e) {
+                                console.error("[h3guide] classic continuation failed", e);
+                                toast("continuation setup failed: " + (e?.message || e), true);
+                                return;
+                            }
                             doQueue();
                         }, e2.out > 0 ? e2.out : undefined);
                     });
