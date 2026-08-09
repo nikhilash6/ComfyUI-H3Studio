@@ -29,12 +29,10 @@ MAX_TOTAL_FRAMES = 4320   # ~3 minutes at 24fps — keeps the concat in RAM sane
 SUBDIR = "h3reel"
 
 
-def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
-    """One clip's soundtrack -> exactly n_frames/fps seconds starting at
-    start_frames/fps, resampled/channel-matched, padded with silence."""
-    want = int(round(n_frames / fps * sr))
+def _conform(audio, sr, channels):
+    """Any decoded audio -> [1, channels, L] float32 at the target rate."""
     if audio is None or audio.get("waveform") is None or audio["waveform"].shape[-1] == 0:
-        return torch.zeros(1, channels, want)
+        return torch.zeros(1, channels, 0)
     wf = audio["waveform"]
     if wf.ndim == 2:
         wf = wf.unsqueeze(0)
@@ -53,6 +51,16 @@ def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
         wf = wf.repeat(1, math.ceil(channels / max(c, 1)), 1)[:, :channels]
     elif c > channels:
         wf = wf[:, :channels]
+    return wf[:1]
+
+
+def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
+    """One clip's soundtrack -> exactly n_frames/fps seconds starting at
+    start_frames/fps, resampled/channel-matched, padded with silence."""
+    want = int(round(n_frames / fps * sr))
+    wf = _conform(audio, sr, channels)
+    if wf.shape[-1] == 0:
+        return torch.zeros(1, channels, want)
     s0 = int(round(start_frames / fps * sr))
     wf = wf[..., s0:s0 + want]
     if wf.shape[-1] < want:
@@ -126,6 +134,7 @@ def register():
         fade_in = max(0.0, float(body.get("fade_in") or 0.0))
         fade_out = max(0.0, float(body.get("fade_out") or 0.0))
         music = body.get("music") if isinstance(body.get("music"), dict) else None
+        sfx = body.get("sfx") if isinstance(body.get("sfx"), list) else None
         if not isinstance(clips, list) or not (1 <= len(clips) <= 64):
             return web.json_response({"error": "clips must be a list of 1-64 entries"},
                                      status=400)
@@ -133,14 +142,14 @@ def register():
         # every other request (previews, even queue POSTs) stalls behind it
         try:
             payload, status = await asyncio.to_thread(_do_export, clips, fps,
-                                                      fade_in, fade_out, music)
+                                                      fade_in, fade_out, music, sfx)
         except Exception as exc:
             logging.exception("MiniMaxH3Guide: reel export failed")
             return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
                                      status=500)
         return web.json_response(payload, status=status)
 
-    def _do_export(clips, fps, fade_in, fade_out, music=None):
+    def _do_export(clips, fps, fade_in, fade_out, music=None, sfx=None):
         from .minimax_h3_guide import _resize, load_input_video, load_input_audio
 
         pieces = []          # [{frames, audio, xfade_next_frames}]
@@ -237,6 +246,51 @@ def register():
                              music["name"], lvl * 100, start, m_fi, m_fo)
             except Exception:
                 logging.exception("MiniMaxH3Guide: music bed failed — exporting without it")
+
+        # fx samples: each placed at its reel-time `at`, its own in→out slice
+        # of the source file, own level and own head/tail fades, overlaid
+        # additively (three UI tracks, but mixing is mixing)
+        for k, s in enumerate((sfx or [])[:24]):
+            try:
+                sname = str(s.get("name") or "")
+                lvl = max(0.0, min(1.5, float(s.get("level")
+                                              if s.get("level") is not None else 1.0)))
+                if not sname or lvl <= 0:
+                    continue
+                at = max(0.0, float(s.get("at") or 0.0))
+                a0 = int(round(at * sr))
+                if a0 >= out_a.shape[-1]:
+                    logging.info("MiniMaxH3Guide: fx %r at %.1fs is past the reel end "
+                                 "— skipped", sname, at)
+                    continue
+                wf = _conform(load_input_audio(sname, "fx sample %d" % (k + 1)),
+                              sr, channels)
+                in_p = max(0.0, float(s.get("in") or 0.0))
+                out_p = float(s.get("out") or 0.0)
+                i0 = int(round(in_p * sr))
+                i1 = wf.shape[-1] if out_p <= 0 else max(i0 + 1,
+                                                         int(round(out_p * sr)))
+                wf = wf[..., i0:i1]
+                room = out_a.shape[-1] - a0
+                wf = wf[..., :room]
+                if wf.shape[-1] < 2:
+                    continue
+                s_fi = max(0.0, min(15.0, float(s.get("fade_in") or 0.0)))
+                s_fo = max(0.0, min(15.0, float(s.get("fade_out") or 0.0)))
+                if s_fi > 0:
+                    n2 = min(int(round(s_fi * sr)), wf.shape[-1])
+                    if n2 > 1:
+                        wf[..., :n2] *= torch.linspace(0.0, 1.0, n2)
+                if s_fo > 0:
+                    n2 = min(int(round(s_fo * sr)), wf.shape[-1])
+                    if n2 > 1:
+                        wf[..., -n2:] *= torch.linspace(1.0, 0.0, n2)
+                out_a[..., a0:a0 + wf.shape[-1]] += wf * lvl
+                logging.info("MiniMaxH3Guide: fx %r mixed at %.1fs (%.1fs, %.0f%%)",
+                             sname, at, wf.shape[-1] / sr, lvl * 100)
+            except Exception:
+                logging.exception("MiniMaxH3Guide: fx sample %d failed — exporting "
+                                  "without it", k + 1)
 
         # whole-reel fades: video to black, audio to silence
         if fade_in > 0:

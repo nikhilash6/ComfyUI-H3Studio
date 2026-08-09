@@ -450,6 +450,7 @@ function attachTimeline(node) {
         mids: [], beats: [], refs: [], midsAuto: true, refsAuto: true,
         videoRefs: [], videoRefsAuto: true, videoMeta: new Map(),
         guideAudio: null,    // {name, peaks, bins, onsets, duration} | {name} loading | {name, failed}
+        sfxMeta: new Map(),  // fx sample name -> duration (seconds) | null loading | 0 failed
         firstCrop: null, lastCrop: null, midCrops: [], refCrops: [], videoCrops: [],
         sel: null,           // {kind:'first'|'last'|'mid'|'beat'|'ref', i?}
         reelTarget: null,    // {idx, name} armed by a reel card's ⚙ — offer replace
@@ -606,12 +607,8 @@ function attachTimeline(node) {
         return null;
     }
 
-    function guideOffset() {
-        // where in the song this clip starts. follow mode = the reel's summed
-        // kept duration, so the timeline always shows the NEXT clip's slice;
-        // null = still reading clip durations
-        const g = node.properties?.h3_guide || {};
-        if (!g.follow) return Number(g.offset) || 0;
+    function reelKeptTotal() {
+        // the reel's summed kept duration; null = still reading clip durations
         let total = 0;
         for (const e of reelGet()) {
             if (e.out > 0) total += Math.max(0, e.out - (e.in || 0));
@@ -623,6 +620,50 @@ function attachTimeline(node) {
             }
         }
         return total;
+    }
+
+    function guideOffset() {
+        // where in the song this clip starts. follow mode = the reel's summed
+        // kept duration, so the timeline always shows the NEXT clip's slice
+        const g = node.properties?.h3_guide || {};
+        return g.follow ? reelKeptTotal() : (Number(g.offset) || 0);
+    }
+
+    // ---- fx tracks: samples placed on the REEL timeline, mixed at export ---
+    const SFX_TRACKS = 3;
+    function sfxGet() {
+        const t = node.properties?.h3_sfx;
+        if (Array.isArray(t) && t.length === SFX_TRACKS) return t;
+        return Array.from({ length: SFX_TRACKS }, () => []);
+    }
+    function sfxSet(tracks) {
+        node.properties = node.properties || {};
+        node.properties.h3_sfx = tracks;
+        state.fs?.renderSfx?.();
+    }
+    function sfxAll() {
+        return sfxGet().flat();
+    }
+    function sfxLevel(s) {
+        return s.level == null ? 1 : Math.max(0, Math.min(1.5, Number(s.level) || 0));
+    }
+    function ensureSfxDur(name) {
+        const have = state.sfxMeta.get(name);
+        if (have !== undefined) return have || null;
+        state.sfxMeta.set(name, null);
+        const a = document.createElement("audio");
+        a.preload = "metadata";
+        a.src = inputFileUrl(name);
+        a.addEventListener("loadedmetadata", () => {
+            state.sfxMeta.set(name, isFinite(a.duration) ? a.duration : 0);
+            a.removeAttribute("src");
+            a.load();
+            state.fs?.renderSfx?.();
+        }, { once: true });
+        a.addEventListener("error", () => {
+            state.sfxMeta.set(name, 0);
+        }, { once: true });
+        return null;
     }
 
     function guideSnapFrac(frac, tolFrac) {
@@ -1765,13 +1806,27 @@ function attachTimeline(node) {
                 audios: connectedSlots(node, "ref_audio_").map((s) => s.slot),
             },
             fields,
+            // project-level audio state (guide track + fx arrangement) — setup
+            // FILES restore these; a reel card's ⚙ deliberately does not (a
+            // retake must not wipe fx work done since that clip rendered)
+            props: {
+                h3_guide: node.properties?.h3_guide || {},
+                h3_sfx: node.properties?.h3_sfx || [],
+            },
         };
     }
 
-    function applySetupFields(setup) {
+    function applySetupFields(setup, skipProps) {
         for (const f of SETUP_FIELDS) {
             if (f in setup.fields) setWidget(f, setup.fields[f]);
             else if (f in SETUP_DEFAULTS) setWidget(f, SETUP_DEFAULTS[f]);
+        }
+        if (!skipProps && setup.props) {
+            node.properties = node.properties || {};
+            if (setup.props.h3_guide) node.properties.h3_guide = setup.props.h3_guide;
+            if (Array.isArray(setup.props.h3_sfx)) node.properties.h3_sfx = setup.props.h3_sfx;
+            state.guideAudio = null;   // decode the restored guide fresh
+            state.fs?.renderSfx?.();
         }
         refresh(true);
         // honest resume report: what the snapshot expected that this graph lacks
@@ -4182,18 +4237,41 @@ function attachTimeline(node) {
                 music.src = inputFileUrl(gMus.name);
                 music.volume = musicBase;
             }
-            const reelTotal = () => {
-                // whole-reel kept duration, for previewing the music fade-out
-                let tot = 0;
-                for (const e of list) {
-                    if (e.out > 0) tot += Math.max(0, e.out - (e.in || 0));
-                    else {
-                        const d = state.videoMeta.get(e.name)?.dur;
-                        if (!d) { ensureVideoMeta(e.name); return null; }
-                        tot += Math.max(0, d - (e.in || 0));
+            const reelTotal = () => reelKeptTotal();
+            // fx samples: one element each, windowed onto reel time with their
+            // own in/out slice, volume and fades — same maths as the export
+            const sfxPlay = sfxAll().filter((s) => s.name && sfxLevel(s) > 0).map((s) => {
+                const a = document.createElement("audio");
+                a.preload = "auto";
+                a.src = inputFileUrl(s.name);
+                return { s, a, base: Math.min(1, sfxLevel(s)) };
+            });
+            const tickSfx = (elapsed, playing) => {
+                for (const p of sfxPlay) {
+                    const { s, a } = p;
+                    const inP = Math.max(0, Number(s.in) || 0);
+                    const dur = isFinite(a.duration) ? a.duration : 0;
+                    const outP = Number(s.out) > 0 ? Math.min(Number(s.out), dur || Number(s.out))
+                        : dur;
+                    const seg = Math.max(0, (outP || 0) - inP);
+                    const within = elapsed - (Number(s.at) || 0);
+                    if (!playing || !seg || within < 0 || within >= seg) {
+                        if (!a.paused) a.pause();
+                        continue;
                     }
+                    const want = inP + within;
+                    if (a.paused) {
+                        a.currentTime = want;
+                        a.play().catch(() => {});
+                    } else if (Math.abs(a.currentTime - want) > 0.3) {
+                        a.currentTime = want;   // drifted — resync
+                    }
+                    const fi = Number(s.fadeIn) || 0, fo = Number(s.fadeOut) || 0;
+                    let ramp = 1;
+                    if (fi > 0) ramp = Math.min(ramp, within / fi);
+                    if (fo > 0) ramp = Math.min(ramp, (seg - within) / fo);
+                    a.volume = p.base * Math.min(1, Math.max(0, ramp));
                 }
-                return tot;
             };
             const syncMusic = (withinClip) => {
                 if (!music) return;
@@ -4244,6 +4322,8 @@ function attachTimeline(node) {
                 const tick = () => {
                     if (stopped) return;
                     const v = vids[act], e = entry(idx);
+                    const elapsedNow = reelClock + Math.max(0, v.currentTime - (e.in || 0));
+                    tickSfx(elapsedNow, !v.paused);
                     // preview the music's own fades: same maths as the export
                     if (music && !music.paused) {
                         const fi = Number(gMus.musicFadeIn) || 0;
@@ -4310,6 +4390,7 @@ function attachTimeline(node) {
                     } else {
                         v.pause();
                         if (music) music.pause();
+                        tickSfx(0, false);   // pause every fx sample too
                     }
                 });
                 // start: first clip visible + playing, second preloading
@@ -4359,6 +4440,9 @@ function attachTimeline(node) {
                 }
                 if (music) {
                     try { music.pause(); music.removeAttribute("src"); music.load(); } catch (e) {}
+                }
+                for (const p of sfxPlay) {
+                    try { p.a.pause(); p.a.removeAttribute("src"); p.a.load(); } catch (e) {}
                 }
             });
         }
@@ -4780,6 +4864,13 @@ function attachTimeline(node) {
                                 fade_in: Number(g2.musicFadeIn) || 0,
                                 fade_out: Number(g2.musicFadeOut) || 0 }
                             : null,
+                        sfx: sfxAll().filter((s) => s.name && sfxLevel(s) > 0)
+                            .map((s) => ({ name: s.name, at: Number(s.at) || 0,
+                                level: sfxLevel(s),
+                                in: Math.max(0, Number(s.in) || 0),
+                                out: Number(s.out) > 0 ? Number(s.out) : 0,
+                                fade_in: Number(s.fadeIn) || 0,
+                                fade_out: Number(s.fadeOut) || 0 })),
                     }),
                 });
                 const j = await r.json();
@@ -4867,6 +4958,242 @@ function attachTimeline(node) {
             display: "none", gap: "10px", padding: "8px 16px 14px", overflowX: "auto",
             flex: "0 0 auto", alignItems: "flex-start",
         });
+
+        // ---- FX TRACKS: three overlay lanes across the whole reel — drop
+        // samples (audio picker: files / mic / web search), drag them into
+        // place, each with its own volume and fades. Mixed at export;
+        // play-reel previews them live.
+        const sfxHead = el("div", {
+            ...sectionHeadStyle(), display: "none", justifyContent: "space-between",
+            gap: "16px", alignItems: "center",
+        });
+        sfxHead.appendChild(el("span", null,
+            "FX TRACKS — sound effects laid over the whole reel (band hit here, car engine there). Drag chips to place; click one for volume + fades. Mixed at export; ▶ play reel previews them"));
+        const sfxWrap = el("div", {
+            display: "none", flexDirection: "column", gap: "4px",
+            padding: "4px 16px 10px", flex: "0 0 auto",
+        });
+        let sfxSel = null;   // {t, i}
+        const sfxLanes = [];
+        for (let t = 0; t < SFX_TRACKS; t++) {
+            const rowEl = el("div", { display: "flex", gap: "8px", alignItems: "center" });
+            rowEl.appendChild(el("span", {
+                color: COL.text, fontSize: "10px", fontFamily: "monospace", width: "26px",
+            }, "fx" + (t + 1)));
+            const laneEl = el("div", {
+                position: "relative", flex: "1", height: "22px",
+                background: "#101010", border: `1px solid ${COL.border}`, borderRadius: "3px",
+                overflow: "hidden",
+            });
+            const addB2 = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "+");
+            addB2.title = "add a sample to this track (input folder, upload, mic, or the free web search) — it lands after the track's last sample; drag it into place";
+            addB2.addEventListener("click", () => openAudioPicker((n) => {
+                const tracks = sfxGet().map((x) => x.slice());
+                const lane = tracks[t];
+                let at = 0;
+                if (lane.length) {
+                    const last = lane[lane.length - 1];
+                    at = (Number(last.at) || 0) + (state.sfxMeta.get(last.name) || 1);
+                }
+                lane.push({ name: n, at: Math.round(at * 10) / 10, level: 1,
+                    fadeIn: 0, fadeOut: 0 });
+                sfxSel = { t, i: lane.length - 1 };
+                sfxSet(tracks);
+            }));
+            rowEl.append(laneEl, addB2);
+            sfxWrap.appendChild(rowEl);
+            sfxLanes.push(laneEl);
+        }
+        // selected-sample editor row
+        const sfxEd = el("div", {
+            display: "none", gap: "8px", alignItems: "center", flexWrap: "wrap",
+            fontSize: "11px", color: COL.text,
+        });
+        sfxWrap.appendChild(sfxEd);
+        const sfxField = (width) => {
+            const f = el("input");
+            Object.assign(f.style, {
+                width: width + "px", background: COL.input, color: COL.bright,
+                border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
+                padding: "2px 4px", fontFamily: "monospace", textAlign: "center",
+            });
+            f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
+            return f;
+        };
+        const sfxName = el("span", { color: COL.bright, fontSize: "11px", maxWidth: "180px",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+        const sfxAt = sfxField(50);
+        sfxAt.title = "where the sample starts on the reel, in seconds";
+        const sfxVol = sfxField(42);
+        sfxVol.title = "this sample's volume, percent (up to 150)";
+        const sfxFi = sfxField(36);
+        sfxFi.title = "fade in, seconds (the sample's own head)";
+        const sfxFo = sfxField(36);
+        sfxFo.title = "fade out, seconds (the sample's own tail)";
+        const sfxIn = sfxField(42);
+        sfxIn.title = "use only part of the file: start point WITHIN the sample, seconds";
+        const sfxOut = sfxField(42);
+        sfxOut.title = "end point within the sample, seconds (0 = to its end)";
+        const sfxSelEntry = () => sfxSel ? sfxGet()[sfxSel.t]?.[sfxSel.i] : null;
+        const sfxPatch = (patch) => {
+            if (!sfxSel) return;
+            const tracks = sfxGet().map((x) => x.slice());
+            const s = tracks[sfxSel.t]?.[sfxSel.i];
+            if (!s) return;
+            tracks[sfxSel.t][sfxSel.i] = { ...s, ...patch };
+            sfxSet(tracks);
+        };
+        sfxAt.addEventListener("blur", () => {
+            const v = parseFloat(sfxAt.value);
+            sfxPatch({ at: isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : 0 });
+        });
+        sfxVol.addEventListener("blur", () => {
+            const v = Math.max(0, Math.min(150, parseFloat(sfxVol.value) || 0));
+            sfxPatch({ level: v / 100 });
+        });
+        sfxFi.addEventListener("blur", () => {
+            const v = Math.max(0, Math.min(15, parseFloat(sfxFi.value) || 0));
+            sfxPatch({ fadeIn: v });
+        });
+        sfxFo.addEventListener("blur", () => {
+            const v = Math.max(0, Math.min(15, parseFloat(sfxFo.value) || 0));
+            sfxPatch({ fadeOut: v });
+        });
+        sfxIn.addEventListener("blur", () => {
+            const v = parseFloat(sfxIn.value);
+            sfxPatch({ in: isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : 0 });
+        });
+        sfxOut.addEventListener("blur", () => {
+            const v = parseFloat(sfxOut.value);
+            sfxPatch({ out: isFinite(v) && v > 0 ? Math.round(v * 10) / 10 : 0 });
+        });
+        let sfxPrev = null;
+        const sfxPlayB = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "▶");
+        sfxPlayB.title = "audition just this sample at its volume";
+        sfxPlayB.addEventListener("click", () => {
+            const s = sfxSelEntry();
+            if (!s) return;
+            if (sfxPrev) { try { sfxPrev.pause(); } catch (e) {} sfxPrev = null; sfxPlayB.textContent = "▶"; return; }
+            sfxPrev = document.createElement("audio");
+            sfxPrev.src = inputFileUrl(s.name);
+            sfxPrev.volume = Math.min(1, sfxLevel(s));
+            const inP = Math.max(0, Number(s.in) || 0);
+            const outP = Number(s.out) > 0 ? Number(s.out) : 0;
+            sfxPrev.addEventListener("loadedmetadata", () => {
+                if (sfxPrev) sfxPrev.currentTime = inP;
+            }, { once: true });
+            sfxPrev.addEventListener("timeupdate", function stopAtOut() {
+                if (sfxPrev && outP > 0 && sfxPrev.currentTime >= outP) {
+                    sfxPrev.pause();
+                    sfxPrev = null;
+                    sfxPlayB.textContent = "▶";
+                }
+            });
+            sfxPrev.play().catch(() => {});
+            sfxPlayB.textContent = "⏸";
+            sfxPrev.addEventListener("ended", () => { sfxPrev = null; sfxPlayB.textContent = "▶"; });
+        });
+        const sfxDelB = el("button", { ...btnStyle, color: COL.red, padding: "0 7px", fontSize: "11px" }, "✕");
+        sfxDelB.title = "remove this sample from the track";
+        sfxDelB.addEventListener("click", () => {
+            if (!sfxSel) return;
+            const tracks = sfxGet().map((x) => x.slice());
+            tracks[sfxSel.t]?.splice(sfxSel.i, 1);
+            sfxSel = null;
+            sfxSet(tracks);
+        });
+        sfxEd.append(sfxName,
+            el("span", null, "at"), sfxAt, el("span", null, "s ·"),
+            el("span", null, "vol"), sfxVol, el("span", null, "% ·"),
+            el("span", null, "clip"), sfxIn, el("span", null, "–"), sfxOut,
+            el("span", null, "s ·"),
+            el("span", null, "fade"), sfxFi, el("span", null, "/"), sfxFo,
+            el("span", null, "s"), sfxPlayB, sfxDelB);
+        // the audible span of a sample: its in→out window, capped by file length
+        const sfxSegLen = (s) => {
+            const dur = state.sfxMeta.get(s.name) || 0;
+            const inP = Math.max(0, Number(s.in) || 0);
+            const outP = Number(s.out) > 0 ? Number(s.out) : (dur || 0);
+            return Math.max(0.1, (outP || 1) - inP);
+        };
+
+        function renderSfx() {
+            const tracks = sfxGet();
+            const any = tracks.some((x) => x.length);
+            const show = reelGet().length || any;
+            sfxHead.style.display = show ? "flex" : "none";
+            sfxWrap.style.display = show ? "flex" : "none";
+            if (!show) return;
+            const tot = reelKeptTotal();
+            tracks.forEach((lane, t) => {
+                const laneEl = sfxLanes[t];
+                laneEl.textContent = "";
+                lane.forEach((s, i) => {
+                    const dur = state.sfxMeta.get(s.name) ?? ensureSfxDur(s.name) ?? 0;
+                    const chip = el("div", {
+                        position: "absolute", top: "2px", bottom: "2px",
+                        background: "rgba(158,228,147,0.28)",
+                        border: `1px solid ${sfxSel && sfxSel.t === t && sfxSel.i === i ? COL.sel : COL.green}`,
+                        borderRadius: "3px", color: COL.bright, fontSize: "10px",
+                        fontFamily: "monospace", padding: "1px 4px", cursor: "grab",
+                        overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis",
+                        touchAction: "none", userSelect: "none",
+                    });
+                    const at = Number(s.at) || 0;
+                    const seg = sfxSegLen(s);
+                    if (tot) {
+                        chip.style.left = Math.min(97, at / tot * 100) + "%";
+                        chip.style.width = Math.max(4, Math.min(100, seg / tot * 100)) + "%";
+                    } else {
+                        chip.style.left = (i * 70) + "px";
+                        chip.style.width = "64px";
+                    }
+                    chip.textContent = s.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                    chip.title = `${chip.textContent} — at ${at.toFixed(1)}s, ${Math.round(sfxLevel(s) * 100)}%`
+                        + `, ${seg.toFixed(1)}s used` + (dur ? ` of ${dur.toFixed(1)}s` : "")
+                        + ". Drag to move; click to edit.";
+                    chip.addEventListener("pointerdown", (ev) => {
+                        ev.preventDefault();
+                        chip.setPointerCapture(ev.pointerId);
+                        const rect = laneEl.getBoundingClientRect();
+                        const startX = ev.clientX;
+                        let moved = false, newAt = at;
+                        const move = (e2) => {
+                            if (Math.abs(e2.clientX - startX) > 3) moved = true;
+                            if (!moved || !tot) return;
+                            newAt = Math.min(Math.max(0,
+                                (e2.clientX - rect.left) / rect.width * tot), Math.max(0, tot - 0.1));
+                            newAt = Math.round(newAt * 10) / 10;
+                            chip.style.left = Math.min(97, newAt / tot * 100) + "%";
+                        };
+                        const up = () => {
+                            chip.removeEventListener("pointermove", move);
+                            chip.removeEventListener("pointerup", up);
+                            sfxSel = { t, i };
+                            if (moved) sfxPatch({ at: newAt });
+                            else renderSfx();   // click = select
+                        };
+                        chip.addEventListener("pointermove", move);
+                        chip.addEventListener("pointerup", up);
+                    });
+                    laneEl.appendChild(chip);
+                });
+            });
+            // editor row reflects the selection
+            const s = sfxSelEntry();
+            sfxEd.style.display = s ? "flex" : "none";
+            if (s) {
+                sfxName.textContent = "♪ " + s.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                if (document.activeElement !== sfxAt) sfxAt.value = String(Number(s.at) || 0);
+                if (document.activeElement !== sfxVol)
+                    sfxVol.value = String(Math.round(sfxLevel(s) * 100));
+                if (document.activeElement !== sfxFi) sfxFi.value = String(Number(s.fadeIn) || 0);
+                if (document.activeElement !== sfxFo) sfxFo.value = String(Number(s.fadeOut) || 0);
+                if (document.activeElement !== sfxIn) sfxIn.value = String(Number(s.in) || 0);
+                if (document.activeElement !== sfxOut) sfxOut.value = String(Number(s.out) || 0);
+            }
+        }
+
         function renderReel() {
             const list = reelGet();
             reelHead.style.display = list.length ? "flex" : "none";
@@ -4991,7 +5318,7 @@ function attachTimeline(node) {
                                 return;
                             }
                             delete b.dataset.confirm;
-                            const missing = applySetupFields(entry.setup);
+                            const missing = applySetupFields(entry.setup, true);   // clip recipe only
                             state.reelTarget = { idx: i, name: entry.name };
                             toast(`clip ${i + 1}'s setup loaded — tweak and ▶ queue; the render dock will offer to replace the card`
                                 + (missing.length ? ` (missing sockets: ${missing.join(", ")})` : ""),
@@ -5019,11 +5346,12 @@ function attachTimeline(node) {
                 c.append(ro, foot);
                 reelRow.appendChild(c);
             });
+            renderSfx();   // fx lanes scale to the reel's kept duration
         }
 
         main.append(promptHead, chipRow, promptTA, v2vBar, mcBar, stripHead, strip, trackHead, track,
             refsHead, refsRow, vidHead, vidRow, audioHead, audioRow,
-            reelHead, reelRow, helpStrip);
+            reelHead, reelRow, sfxHead, sfxWrap, helpStrip);
         body.append(main, inspector);
         root.append(header, body);
 
@@ -6590,7 +6918,7 @@ function attachTimeline(node) {
         ro?.observe(main);
         root.appendChild(resPanel);   // render results dock over the editor
         document.body.appendChild(root);
-        state.fs = { root, onKey, fill, renderTrack, renderReel, ro, apiEvents };
+        state.fs = { root, onKey, fill, renderTrack, renderReel, renderSfx, ro, apiEvents };
         fill();
     }
     node._h3OpenFS = openFullscreen;
