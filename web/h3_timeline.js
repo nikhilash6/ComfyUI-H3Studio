@@ -1048,7 +1048,14 @@ function attachTimeline(node) {
         const onKey = (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); closeModal(); } };
         window.addEventListener("keydown", onKey, true);
         state.modal = { root, onKey, onClose };
-        build(root);
+        const p = build(root);
+        // an async build that rejects used to vanish without a trace, leaving a
+        // half-built modal that read as "stuck" — make it loud instead
+        if (p && typeof p.catch === "function")
+            p.catch((e) => {
+                console.error("[h3guide] modal build failed", e);
+                toast("this panel hit an error: " + (e?.message || e), true);
+            });
         document.body.appendChild(root);
     }
 
@@ -1716,9 +1723,12 @@ function attachTimeline(node) {
             root.appendChild(panel);
 
             // --- SAVE pane: current FILE-sourced refs + audio become a cast member
+            // (own try/catch: a save-pane failure must never take the cast list
+            // below down with it — that coupling made the whole modal look dead)
             const saveBox = el("div", {
                 border: `1px solid ${COL.divider}`, borderRadius: "6px", padding: "10px",
             });
+            try {
             saveBox.appendChild(el("div", { color: COL.bright, fontSize: "12px", marginBottom: "6px" },
                 "Save the current references as a cast member"));
             const savables = state.refs
@@ -1792,6 +1802,11 @@ function attachTimeline(node) {
                 nameRow.append(nameIn, saveB);
                 saveBox.appendChild(nameRow);
             }
+            } catch (e) {
+                console.error("[h3guide] cast save pane failed", e);
+                saveBox.appendChild(el("div", { color: COL.red, fontSize: "12px" },
+                    "⚠ save pane failed: " + (e?.message || e)));
+            }
             bodyEl.appendChild(saveBox);
 
             // --- LOAD pane: every saved cast member, thumbnails, one-click add
@@ -1809,8 +1824,10 @@ function attachTimeline(node) {
 
             listEl.appendChild(el("div", { color: COL.text, fontSize: "12px" }, "loading…"));
             const myRoot = root;
+            try {
             const files = (await fetchInternalFiles("input"))
-                .map((f) => f.replace(/\s*\[\w+\]\s*$/, ""))
+                .map((f) => (typeof f === "string" ? f : (f?.name || ""))
+                    .replace(/\s*\[\w+\]\s*$/, ""))
                 .filter((f) => f.startsWith(CAST_PREFIX) && f.endsWith(".json"));
             if (state.modal?.root !== myRoot) return;   // closed mid-fetch
             listEl.textContent = "";
@@ -1923,6 +1940,16 @@ function attachTimeline(node) {
                 });
                 row.appendChild(addB);
                 listEl.appendChild(row);
+            }
+            } catch (e) {
+                // an async death here used to leave "loading…" forever with no
+                // trace — now the modal says what broke
+                console.error("[h3guide] cast list failed", e);
+                if (state.modal?.root === myRoot) {
+                    listEl.textContent = "";
+                    listEl.appendChild(el("div", { color: COL.red, fontSize: "12px" },
+                        "⚠ cast list failed: " + (e?.message || e)));
+                }
             }
         });
     }
