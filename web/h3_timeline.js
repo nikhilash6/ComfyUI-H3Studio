@@ -688,6 +688,26 @@ function attachTimeline(node) {
     function addFileVideo(name) {
         const socketCount = connectedSlots(node, "ref_video_").length;
         const lines = fileLinesOf("ref_video_files");
+        if (lines.length) {
+            // one momentum slot: adding REPLACES the newest file video ref
+            // (strength survives; the old framing belonged to the old footage)
+            const idx = lines.length - 1;
+            const old = lines[idx];
+            if (old === name) { toast("that clip is already the video reference"); return; }
+            lines[idx] = name;
+            const ent = state.videoRefs.find((v) => v.src.type === "file" && v.src.idx === idx);
+            if (ent) {
+                const i = state.videoRefs.indexOf(ent);
+                state.videoCrops[i] = null;
+                ent.src = { type: "file", idx, name };   // reconcile matches by name
+            }
+            pushCrops();
+            setWidget("ref_video_files", lines.join("\n"));
+            refresh(true);
+            toast("video reference swapped → " + name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop()
+                + " (strength kept)");
+            return;
+        }
         if (socketCount + lines.length >= 3) { toast("H3 supports at most 3 reference videos", true); return; }
         lines.push(name);
         state.videoCrops.push(null);
