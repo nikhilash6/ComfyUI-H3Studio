@@ -3522,10 +3522,10 @@ function attachTimeline(node) {
         });
 
         async function openVideoPicker(onPick) {
-            const fetchVids = async (type) =>
-                (await fetchInternalFiles(type)).filter((f) => VIDEO_EXT.test(f));
-            let tab = "input";
-            let files = await fetchVids(tab);
+            let tab = "output";   // chaining is the common case
+            let folder = "";
+            let listing = { dirs: [], files: [] };
+            let loadGen = 0;
             openModal((root) => {
                 const panel = el("div", {
                     width: "min(680px, 92vw)", maxHeight: "82vh", background: COL.bg,
@@ -3539,17 +3539,23 @@ function attachTimeline(node) {
                 const list = el("div", { overflowY: "auto", padding: "6px" });
                 const tabBtn = (name, label) => {
                     const b = el("button", btnStyle, label);
-                    b.addEventListener("click", async () => {
+                    b.addEventListener("click", () => {
                         tab = name;
-                        files = await fetchVids(tab);
-                        styleTabs(); fillList();
+                        folder = "";
+                        styleTabs();
+                        load();
                     });
                     return b;
                 };
                 const tIn = tabBtn("input", "input"), tOut = tabBtn("output", "output — chain a render");
+                const crumb = el("span", {
+                    color: COL.text, fontSize: "12px", fontFamily: "monospace", flex: "1",
+                    whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                });
                 const styleTabs = () => {
                     tIn.style.color = tab === "input" ? COL.bright : COL.text;
                     tOut.style.color = tab === "output" ? COL.bright : COL.text;
+                    crumb.textContent = "/" + (folder || "");
                 };
                 const up = el("button", btnStyle, "upload…");
                 const fi = el("input");
@@ -3565,12 +3571,32 @@ function attachTimeline(node) {
                 });
                 const closeB = el("button", btnStyle, "✕");
                 closeB.addEventListener("click", closeModal);
-                head.append(tIn, tOut, el("span", { flex: "1" }), up, fi, closeB);
+                head.append(tIn, tOut, crumb, up, fi, closeB);
+
+                const goTo = (target) => { folder = target; styleTabs(); load(); };
+                const folderRow = (label, target) => {
+                    const row = el("div", {
+                        display: "flex", alignItems: "center", gap: "10px",
+                        padding: "5px 8px", borderRadius: "4px", cursor: "pointer",
+                    });
+                    row.addEventListener("mouseenter", () => row.style.background = "#232323");
+                    row.addEventListener("mouseleave", () => row.style.background = "transparent");
+                    row.append(el("span", { fontSize: "18px", width: "96px", textAlign: "center" }, "📁"),
+                        el("span", { color: COL.bright, fontSize: "12px", flex: "1" }, label));
+                    row.addEventListener("click", () => goTo(target));
+                    return row;
+                };
                 const fillList = () => {
                     list.textContent = "";
-                    if (!files.length) list.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "8px" },
-                        tab === "output" ? "no videos in the output folder yet" : "no videos in the input folder — use upload…"));
-                    for (const f of files.slice(0, 200)) {
+                    if (folder) list.appendChild(folderRow("⬑ up",
+                        folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : ""));
+                    for (const d of listing.dirs)
+                        list.appendChild(folderRow(d.split("/").pop() + "/", d));
+                    if (!listing.files.length && !listing.dirs.length && !folder)
+                        list.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "8px" },
+                            tab === "output" ? "no videos in the output folder yet"
+                                : "no videos in the input folder — use upload…"));
+                    for (const f of listing.files.slice(0, 200)) {
                         const row = el("div", {
                             display: "flex", alignItems: "center", gap: "10px",
                             padding: "5px 8px", borderRadius: "4px", cursor: "pointer",
@@ -3585,12 +3611,34 @@ function attachTimeline(node) {
                             borderRadius: "3px", background: "#222", pointerEvents: "none",
                         });
                         row.append(vv, el("span", { color: COL.bright, fontSize: "12px", flex: "1" },
-                            f.replace(/\s*\[\w+\]\s*$/, "")));
+                            f.replace(/\s*\[\w+\]\s*$/, "").split("/").pop()));
                         row.addEventListener("click", () => { closeModal(); onPick(f); });
                         list.appendChild(row);
                     }
                 };
-                styleTabs(); fillList();
+                const load = async () => {
+                    const gen = ++loadGen;
+                    list.textContent = "";
+                    list.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "8px" }, "loading…"));
+                    try {
+                        const ps = new URLSearchParams({ type: tab, path: folder, kind: "video" });
+                        const r = await api.fetchApi("/h3guide/browse?" + ps.toString());
+                        const j = await r.json();
+                        if (j.error) throw new Error(j.error);
+                        if (gen !== loadGen) return;
+                        const ann = tab === "output" ? " [output]" : "";
+                        listing = { dirs: j.dirs || [], files: (j.files || []).map((f) => f + ann) };
+                        fillList();
+                    } catch (e) {
+                        if (gen !== loadGen) return;
+                        if (folder) { folder = ""; styleTabs(); load(); return; }
+                        list.textContent = "";
+                        list.appendChild(el("div", { color: COL.red, fontSize: "12px", padding: "8px" },
+                            "listing failed: " + e.message));
+                    }
+                };
+                styleTabs();
+                load();
                 panel.append(head, list);
                 root.appendChild(panel);
             });
