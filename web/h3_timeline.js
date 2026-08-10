@@ -354,6 +354,13 @@ const SETUP_DEFAULTS = {
 
 const VIDEO_EXT = /\.(mp4|webm|mov|mkv|m4v|avi)(\s*\[\w+\])?\s*$/i;
 
+// Auto Motion Mode pacing: a human never queues instantly, and ComfyUI's
+// dynamic VRAM pager needs a beat between heavy runs (queueing into the tail
+// of the previous run produced "Fault failed" crashes). Longer after a
+// failure, where models have just been unloaded.
+const AUTO_SETTLE_MS = 2500;
+const AUTO_RETRY_MS = 5000;
+
 async function fetchInternalFiles(type) {
     // /internal is a root-app subapp, NOT aliased under /api — api.fetchApi
     // 404s on it (the output tab showed empty). Try both, newest-first list.
@@ -2832,16 +2839,17 @@ function attachTimeline(node) {
         stats.append(wField, el("span", null, "×"), hField, lockBtn, aspectSel,
             el("span", null, "px ·"), lenField, snapNote);
 
+        const freeVram = () => api.fetchApi("/free", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ unload_models: true, free_memory: true }),
+        });
         const freeBtn = el("button", btnStyle, "🧹 free VRAM");
         freeBtn.title = "unload models and free cached memory on the server — useful between heavy runs or before switching checkpoints. The next queue reloads what it needs (slower first run).";
         freeBtn.addEventListener("click", async () => {
             freeBtn.disabled = true;
             try {
-                await api.fetchApi("/free", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ unload_models: true, free_memory: true }),
-                });
+                await freeVram();
                 toast("VRAM freed — models unload; the next queue reloads them");
             } catch (e) {
                 toast("free failed: " + (e?.message || e), true);
@@ -2853,14 +2861,14 @@ function attachTimeline(node) {
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
         const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0,
-            setup: null, replaceTarget: null, autoAdvanced: false };
+            setup: null, replaceTarget: null, autoAdvanced: false, autoResult: null };
         // Auto Motion Mode: keep the chain going by itself — each finished
         // render joins the reel, becomes the next continuation source, and
         // queues again with the same prompt and settings. auto.left counts
         // remaining clips; auto.on gates the whole loop.
         // exposed on state so closeFullscreen can end the loop: the whole
         // machine (result dock, reel writes) lives in this closure
-        const auto = state.auto = { on: false, left: 0 };
+        const auto = state.auto = { on: false, left: 0, retried: false };
         const autoStop = el("button", { ...btnStyle, color: COL.red, display: "none" },
             "⏹ stop auto");
         autoStop.title = "stop Auto Motion Mode after the current render (the finished clip still joins the reel)";
@@ -3078,35 +3086,13 @@ function attachTimeline(node) {
                     });
                 }
                 resFoot.append(chainB, refB, ...(repB ? [repB] : []), reelB);
-                // 'executed' fires once per OUTPUT NODE, so a graph with two
-                // savers would advance the chain twice — one advance per run
+                // Auto Motion Mode advances on execution_success, NOT here:
+                // 'executed' fires while the run is still finishing (decode,
+                // save), and queueing into that window gave ComfyUI's dynamic
+                // VRAM pager no room to settle — the observed "Fault failed"
+                // crashes. Record the result; onDone does the work.
                 if (auto.on && !run.autoAdvanced) {
-                    // Auto Motion Mode: do by hand exactly what the buttons do —
-                    // add to the reel (with the context head auto-trimmed), make
-                    // THIS clip the next continuation source, queue again.
-                    run.autoAdvanced = true;
-                    auto.left -= 1;
-                    reelAdd(name);
-                    const l = reelGet();
-                    const e3 = l[l.length - 1];
-                    if (e3?.name === name) {
-                        if (runSetup) e3.setup = runSetup;
-                        if (renderedSpan > 0) {
-                            e3.mc = true;
-                            if (!(e3.in > 0)) e3.in = renderedSpan / FPS;
-                        }
-                        reelSet(l);
-                    }
-                    reelB.textContent = "✓ in reel";
-                    reelB.disabled = true;
-                    if (auto.left > 0) {
-                        mcSetFrom(name, e3?.out > 0 ? e3.out : undefined);
-                        refresh(true);
-                        toast(`🔁 auto motion — clip added, ${auto.left} to go; queueing the next…`);
-                        setTimeout(() => { if (auto.on) doQueue(); }, 400);
-                    } else {
-                        autoEnd(`🔁 auto motion finished — ${reelGet().length} clip(s) in the reel`);
-                    }
+                    run.autoResult = { name, runSetup, renderedSpan, reelB };
                 }
                 if (renderedSpan > 0)
                     resFoot.append(el("span", {
@@ -3147,6 +3133,7 @@ function attachTimeline(node) {
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
                 run.autoAdvanced = false;   // one auto-advance per run
+                run.autoResult = null;
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
                 run.setup = captureSetupFields();   // the reel remembers how each clip was made
                 run.replaceTarget = state.reelTarget || null;   // armed by a card's ⚙
@@ -3358,8 +3345,20 @@ function attachTimeline(node) {
                         + `and feeds the next. ⏹ stop auto in the header to end it early.`);
                     doQueue();
                 });
+                const autoFree = el("label", { display: "flex", gap: "4px",
+                    alignItems: "center", fontSize: "11px", color: COL.text,
+                    cursor: "pointer", whiteSpace: "nowrap" });
+                const autoFreeCb = el("input");
+                autoFreeCb.type = "checkbox";
+                autoFreeCb.checked = !!node.properties?.h3_auto_free;
+                autoFree.title = "unload models between clips (🧹) — slower, but the safest option if long chains hit VRAM faults on heavy renders. A failed clip retries once with a free regardless.";
+                autoFreeCb.addEventListener("change", () => {
+                    node.properties = node.properties || {};
+                    node.properties.h3_auto_free = autoFreeCb.checked;
+                });
+                autoFree.append(autoFreeCb, el("span", null, "🧹 between clips"));
                 autoRow.append(autoB,
-                    el("span", { color: COL.text, fontSize: "11px" }, "clips"), autoN);
+                    el("span", { color: COL.text, fontSize: "11px" }, "clips"), autoN, autoFree);
                 sel.addEventListener("change", () => {
                     whyNote.textContent = "· " + (sel.value === "picked"
                         ? "hand-picked clip (not in the reel)"
@@ -3414,6 +3413,39 @@ function attachTimeline(node) {
             setTimeout(() => { qWrap.style.display = "none"; }, 2500);
             run.pid = null;
             run.live = false;
+            // the run is REALLY over now (decode and save included) — safe to
+            // bank the clip and queue the next one
+            const r = run.autoResult;
+            run.autoResult = null;
+            if (!auto.on || !r || run.autoAdvanced) return;
+            run.autoAdvanced = true;
+            auto.retried = false;   // this clip landed; the next gets its own retry
+            auto.left -= 1;
+            reelAdd(r.name);
+            const l = reelGet();
+            const e3 = l[l.length - 1];
+            if (e3?.name === r.name) {
+                if (r.runSetup) e3.setup = r.runSetup;
+                if (r.renderedSpan > 0) {
+                    e3.mc = true;
+                    if (!(e3.in > 0)) e3.in = r.renderedSpan / FPS;
+                }
+                reelSet(l);
+            }
+            if (r.reelB) { r.reelB.textContent = "✓ in reel"; r.reelB.disabled = true; }
+            if (auto.left > 0) {
+                mcSetFrom(r.name, e3?.out > 0 ? e3.out : undefined);
+                refresh(true);
+                toast(`🔁 auto motion — clip added, ${auto.left} to go; next queue in a moment…`);
+                // settle window: VRAM paging and the caching allocator need a
+                // beat between heavy runs, and a human never queues this fast
+                const wait = node.properties?.h3_auto_free ? AUTO_RETRY_MS : AUTO_SETTLE_MS;
+                const pre = node.properties?.h3_auto_free
+                    ? freeVram().catch(() => {}) : Promise.resolve();
+                pre.then(() => setTimeout(() => { if (auto.on) doQueue(); }, wait));
+            } else {
+                autoEnd(`🔁 auto motion finished — ${reelGet().length} clip(s) in the reel`);
+            }
         };
         const onExecError = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
@@ -3421,8 +3453,20 @@ function attachTimeline(node) {
             qFill.style.background = COL.red;
             run.pid = null;
             run.live = false;
-            // never keep firing renders into a failing graph
-            autoEnd("auto motion stopped — the render failed (see the graph)");
+            run.autoResult = null;
+            if (!auto.on) return;
+            if (auto.retried) {
+                // twice in a row is a real problem, not a transient one
+                autoEnd("auto motion stopped — the render failed twice (see the graph)");
+                return;
+            }
+            // heavy H3 runs can fail on a transient VRAM paging fault; give the
+            // server a clean slate and retry this clip ONCE before giving up
+            auto.retried = true;
+            toast("render failed — freeing VRAM and retrying this clip once…", true);
+            freeVram().catch(() => {}).then(() => {
+                setTimeout(() => { if (auto.on) doQueue(); }, AUTO_RETRY_MS);
+            });
         };
         const apiEvents = [["execution_start", onExecStart], ["progress", onProgress],
             ["b_preview", onPreview], ["executed", onExecuted],
