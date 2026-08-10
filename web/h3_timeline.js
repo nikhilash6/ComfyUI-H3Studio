@@ -454,6 +454,7 @@ function attachTimeline(node) {
         firstCrop: null, lastCrop: null, midCrops: [], refCrops: [], videoCrops: [],
         sel: null,           // {kind:'first'|'last'|'mid'|'beat'|'ref', i?}
         reelTarget: null,    // {idx, name} armed by a reel card's ⚙ — offer replace
+        auto: null,          // Auto Motion Mode flag, owned by the fullscreen editor
         drag: null, syncing: false, specError: null,
         thumbTry: 0, thumbTimer: null,
         imgCache: new Map(),
@@ -2679,6 +2680,13 @@ function attachTimeline(node) {
     function closeFullscreen() {
         closeCtxMenu();
         stopRecorder();
+        if (state.auto?.on) {
+            // the loop is driven by the dock's result handler, which dies with
+            // the editor — end it here rather than leaving it half-alive
+            state.auto.on = false;
+            state.auto.left = 0;
+            toast("auto motion stopped — the editor closed");
+        }
         if (ACTIVE_EDITOR_CLOSE === closeFullscreen) ACTIVE_EDITOR_CLOSE = null;
         const f = state.fs;
         if (!f) return;
@@ -2842,7 +2850,25 @@ function attachTimeline(node) {
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
         const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0,
-            setup: null, replaceTarget: null };
+            setup: null, replaceTarget: null, autoAdvanced: false };
+        // Auto Motion Mode: keep the chain going by itself — each finished
+        // render joins the reel, becomes the next continuation source, and
+        // queues again with the same prompt and settings. auto.left counts
+        // remaining clips; auto.on gates the whole loop.
+        // exposed on state so closeFullscreen can end the loop: the whole
+        // machine (result dock, reel writes) lives in this closure
+        const auto = state.auto = { on: false, left: 0 };
+        const autoStop = el("button", { ...btnStyle, color: COL.red, display: "none" },
+            "⏹ stop auto");
+        autoStop.title = "stop Auto Motion Mode after the current render (the finished clip still joins the reel)";
+        const autoEnd = (why) => {
+            if (!auto.on) return;
+            auto.on = false;
+            auto.left = 0;
+            autoStop.style.display = "none";
+            if (why) toast(why);
+        };
+        autoStop.addEventListener("click", () => autoEnd("auto motion stopped — the current render finishes normally"));
         const qWrap = el("span", { display: "none", alignItems: "center", gap: "6px" });
         const qBar = el("div", {
             width: "110px", height: "6px", background: "#2a2a2a",
@@ -3049,6 +3075,36 @@ function attachTimeline(node) {
                     });
                 }
                 resFoot.append(chainB, refB, ...(repB ? [repB] : []), reelB);
+                // 'executed' fires once per OUTPUT NODE, so a graph with two
+                // savers would advance the chain twice — one advance per run
+                if (auto.on && !run.autoAdvanced) {
+                    // Auto Motion Mode: do by hand exactly what the buttons do —
+                    // add to the reel (with the context head auto-trimmed), make
+                    // THIS clip the next continuation source, queue again.
+                    run.autoAdvanced = true;
+                    auto.left -= 1;
+                    reelAdd(name);
+                    const l = reelGet();
+                    const e3 = l[l.length - 1];
+                    if (e3?.name === name) {
+                        if (runSetup) e3.setup = runSetup;
+                        if (renderedSpan > 0) {
+                            e3.mc = true;
+                            if (!(e3.in > 0)) e3.in = renderedSpan / FPS;
+                        }
+                        reelSet(l);
+                    }
+                    reelB.textContent = "✓ in reel";
+                    reelB.disabled = true;
+                    if (auto.left > 0) {
+                        mcSetFrom(name, e3?.out > 0 ? e3.out : undefined);
+                        refresh(true);
+                        toast(`🔁 auto motion — clip added, ${auto.left} to go; queueing the next…`);
+                        setTimeout(() => { if (auto.on) doQueue(); }, 400);
+                    } else {
+                        autoEnd(`🔁 auto motion finished — ${reelGet().length} clip(s) in the reel`);
+                    }
+                }
                 if (renderedSpan > 0)
                     resFoot.append(el("span", {
                         color: COL.text, fontSize: "10px", flexBasis: "100%",
@@ -3087,6 +3143,7 @@ function attachTimeline(node) {
             try {
                 run.armed = true;   // adopt the next execution_start as ours
                 run.pid = null;
+                run.autoAdvanced = false;   // one auto-advance per run
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
                 run.setup = captureSetupFields();   // the reel remembers how each clip was made
                 run.replaceTarget = state.reelTarget || null;   // armed by a card's ⚙
@@ -3100,6 +3157,7 @@ function attachTimeline(node) {
                 run.armed = false;
                 console.error("[h3guide] queue failed", e);
                 toast("queue failed: " + (e?.message || e), true);
+                autoEnd("auto motion stopped — the queue call failed");
             }
         };
 
@@ -3238,12 +3296,57 @@ function attachTimeline(node) {
                         refresh(true);
                         doQueue();
                     });
-                panel.append(head, fromRow, opts);
+                // hands-free chain: render, add to reel, continue from it, repeat
+                const autoRow = el("div", {
+                    display: "flex", gap: "8px", alignItems: "center",
+                    padding: "0 12px 12px", flexWrap: "wrap",
+                });
+                const autoN = el("input");
+                Object.assign(autoN.style, {
+                    width: "48px", background: COL.input, color: COL.bright,
+                    border: `1px solid ${COL.border}`, borderRadius: "3px",
+                    fontSize: "12px", padding: "3px 5px", fontFamily: "monospace",
+                    textAlign: "center",
+                });
+                autoN.value = String(node.properties?.h3_auto_n || 4);
+                autoN.title = "how many clips to render in the chain (each continues the one before)";
+                autoN.addEventListener("keydown", (ev) => ev.stopPropagation());
+                const autoB = el("button", {
+                    ...btnStyle, color: COL.green, textAlign: "left", padding: "8px 12px",
+                    display: "flex", flexDirection: "column", gap: "2px", flex: "1",
+                });
+                autoB.appendChild(el("span", { fontSize: "13px" }, "🔁 Auto Motion Mode"));
+                autoB.appendChild(el("span", { fontSize: "11px", color: COL.text },
+                    "render, add to the reel, continue from it WITH MOTION, repeat — "
+                    + "hands-free, same prompt and settings every clip. Stop any time "
+                    + "from the header."));
+                autoB.addEventListener("click", () => {
+                    const e2 = chosen();
+                    const n = Math.max(1, Math.min(50, parseInt(autoN.value, 10) || 4));
+                    node.properties = node.properties || {};
+                    node.properties.h3_auto_n = n;
+                    closeModal();
+                    mcDropContRef();
+                    if (sel.value !== "picked")
+                        mcSetFrom(e2.name, e2.out > 0 ? e2.out : undefined);
+                    refresh(true);
+                    auto.on = true;
+                    auto.left = n;
+                    autoStop.style.display = "";
+                    toast(`🔁 auto motion — ${n} clip(s) queued back to back; each joins the reel `
+                        + `and feeds the next. ⏹ stop auto in the header to end it early.`);
+                    doQueue();
+                });
+                autoRow.append(autoB,
+                    el("span", { color: COL.text, fontSize: "11px" }, "clips"), autoN);
+                panel.append(head, fromRow, opts, autoRow);
                 root.appendChild(panel);
             }, () => {});
         }
 
         queueBtn.addEventListener("click", () => {
+            // pressing queue by hand takes back control of the chain
+            autoEnd("auto motion stopped — you queued manually");
             if (!reelGet().length) { doQueue(); return; }
             openQueueChooser();
         });
@@ -3290,6 +3393,8 @@ function attachTimeline(node) {
             qFill.style.background = COL.red;
             run.pid = null;
             run.live = false;
+            // never keep firing renders into a failing graph
+            autoEnd("auto motion stopped — the render failed (see the graph)");
         };
         const apiEvents = [["execution_start", onExecStart], ["progress", onProgress],
             ["b_preview", onPreview], ["executed", onExecuted],
@@ -3330,7 +3435,7 @@ function attachTimeline(node) {
         const helpBtn = el("button", btnStyle, "?");
         const closeBtn = el("button", btnStyle, "✕");
         closeBtn.addEventListener("click", closeFullscreen);
-        header.append(title, stats, queueBtn, freeBtn, swapBtn, saveBtn, loadBtn, loadInput, helpBtn, closeBtn);
+        header.append(title, stats, queueBtn, autoStop, freeBtn, swapBtn, saveBtn, loadBtn, loadInput, helpBtn, closeBtn);
 
         // body: main column + inspector
         const body = el("div", { display: "flex", flex: "1 1 auto", minHeight: "0" });
