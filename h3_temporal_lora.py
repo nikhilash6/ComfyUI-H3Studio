@@ -25,6 +25,7 @@ import torch
 
 import comfy.lora
 import comfy.nested_tensor
+import comfy.patcher_extension
 import comfy.utils
 from comfy_api.latest import io
 
@@ -107,6 +108,28 @@ class _TemporalBlend:
     def _restore(self):
         for key in self.touched:
             comfy.utils.get_attr(self.module, key).copy_(self.snap[key])
+
+    @torch.no_grad()
+    def release(self):
+        """Drop the weight snapshots when a sampling run ends.
+
+        Without this the snapshot dict (a full device-resident copy of every
+        LoRA-touched weight — hundreds of MB for a big LoRA) stayed alive on
+        the cached model clone BETWEEN runs. Weights are already back on base
+        after every step's finally-restore; the extra restore here is a cheap
+        belt-and-braces before letting the copies go. The next run simply
+        re-snapshots lazily.
+        """
+        if self.snap is None:
+            return
+        try:
+            self._restore()
+        except Exception:
+            logging.exception("H3TemporalLoraBlend: restore-on-release failed; "
+                              "dropping snapshots anyway.")
+        mb = sum(t.numel() * t.element_size() for t in self.snap.values()) / 1e6
+        self.snap = None
+        logging.info("H3TemporalLoraBlend: released %.0f MB of weight snapshots.", mb)
 
     # ---- prediction blend --------------------------------------------------
     def _ramp(self, seconds, device):
@@ -217,7 +240,19 @@ class H3TemporalLoraBlend(io.ComfyNode):
                             "the base — passing the base model through unchanged.")
             return io.NodeOutput(model_base)
         out = model_base.clone()
-        out.set_model_unet_function_wrapper(_TemporalBlend(
-            out.model, patches_a, patches_b,
-            float(boundary_seconds), float(feather_seconds), audio_from))
+        blend = _TemporalBlend(out.model, patches_a, patches_b,
+                               float(boundary_seconds), float(feather_seconds),
+                               audio_from)
+        out.set_model_unet_function_wrapper(blend)
+
+        # snapshots must not outlive the run: an OUTER_SAMPLE wrapper brackets
+        # the whole sampling call, so the finally fires exactly once per run
+        # (including on interrupt/error)
+        def _release_after_sample(executor, *args, **kwargs):
+            try:
+                return executor(*args, **kwargs)
+            finally:
+                blend.release()
+        out.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+                                 "h3_tlora_release", _release_after_sample)
         return io.NodeOutput(out)
