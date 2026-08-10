@@ -2687,6 +2687,9 @@ function attachTimeline(node) {
             state.auto.left = 0;
             toast("auto motion stopped — the editor closed");
         }
+        // ⚙ → queue is meant to be one motion; a target surviving a session
+        // would silently change the next chooser's default
+        state.reelTarget = null;
         if (ACTIVE_EDITOR_CLOSE === closeFullscreen) ACTIVE_EDITOR_CLOSE = null;
         const f = state.fs;
         if (!f) return;
@@ -3206,22 +3209,40 @@ function attachTimeline(node) {
                     sel.appendChild(o);
                 }
                 if (manual && !manualInReel) {
-                    // a clip was hand-picked in the MOTION bar — keep it choosable
+                    // a clip hand-picked in the MOTION bar stays CHOOSABLE, but it
+                    // never wins the default: a leftover context from an earlier
+                    // chain used to hijack the selection silently
                     const o = document.createElement("option");
                     o.value = "picked";
                     o.textContent = "picked: " + manual.replace(/\s*\[\w+\]\s*$/, "");
                     sel.appendChild(o);
-                    sel.value = "picked";
-                } else {
-                    // retaking clip N (⚙ armed)? it should continue from the clip
-                    // BEFORE it, exactly like the original take did — not from the
-                    // newest card, which may be N itself or later
-                    const t = state.reelTarget;
-                    const ti = t ? (list[t.idx]?.name === t.name ? t.idx
-                        : list.findIndex((e) => e.name === t.name)) : -1;
-                    sel.value = ti > 0 ? String(ti - 1) : String(list.length - 1);
                 }
+                // DEFAULT IS ALWAYS THE NEWEST REEL CLIP — the chain continues
+                // from its own end. The single exception is a ⚙-armed retake,
+                // which continues from the clip BEFORE the one being retaken
+                // (what the original take did).
+                const t = state.reelTarget;
+                const ti = t ? (list[t.idx]?.name === t.name ? t.idx
+                    : list.findIndex((e) => e.name === t.name)) : -1;
+                let why = "newest clip in the reel";
+                let defIdx = list.length - 1;
+                if (ti > 0) {
+                    defIdx = ti - 1;
+                    why = `retaking clip ${ti + 1} — continuing from the clip before it, `
+                        + "like the original take did";
+                } else if (ti === 0) {
+                    // clip 1 opens the chain: it never had a predecessor, and
+                    // continuing it from the NEWEST clip would loop the sequence
+                    // back on itself
+                    why = "retaking clip 1 — it opens the chain, so it has no "
+                        + "predecessor: use ▶ just render";
+                }
+                sel.value = String(defIdx);
                 fromRow.appendChild(sel);
+                const whyNote = el("div", {
+                    color: ti === 0 ? COL.mid : COL.text, fontSize: "11px",
+                    padding: "4px 12px 0",
+                }, "· " + why);
 
                 const opts = el("div", {
                     display: "flex", flexDirection: "column", gap: "8px", padding: "10px 12px 12px",
@@ -3339,7 +3360,14 @@ function attachTimeline(node) {
                 });
                 autoRow.append(autoB,
                     el("span", { color: COL.text, fontSize: "11px" }, "clips"), autoN);
-                panel.append(head, fromRow, opts, autoRow);
+                sel.addEventListener("change", () => {
+                    whyNote.textContent = "· " + (sel.value === "picked"
+                        ? "hand-picked clip (not in the reel)"
+                        : (parseInt(sel.value, 10) === list.length - 1
+                            ? "newest clip in the reel" : "your choice"));
+                    whyNote.style.color = COL.text;
+                });
+                panel.append(head, fromRow, whyNote, opts, autoRow);
                 root.appendChild(panel);
             }, () => {});
         }
