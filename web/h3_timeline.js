@@ -3543,6 +3543,16 @@ function attachTimeline(node) {
         });
         mcBar.appendChild(el("span", { color: COL.text, fontSize: "11px", letterSpacing: "0.06em" },
             "⏭▶ MOTION"));
+        // the context's TAIL frame as a live thumbnail — a set context silently
+        // overrides the start frame, so it must be impossible to miss
+        const mcThumb = document.createElement("video");
+        mcThumb.muted = true;
+        mcThumb.preload = "metadata";
+        Object.assign(mcThumb.style, {
+            width: "62px", height: "36px", objectFit: "cover", borderRadius: "3px",
+            border: `1px solid ${COL.green}`, display: "none", flex: "0 0 auto",
+        });
+        mcThumb.title = "the motion context: the render OPENS by continuing from this frame (the clip's tail at the cut point). While this is set, the start frame is ignored — ✕ clears it.";
         const mcLabel = el("span", { color: COL.text, fontSize: "12px", flex: "1",
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
         const mcNote = el("span", { fontSize: "11px", display: "none", whiteSpace: "nowrap",
@@ -3576,7 +3586,7 @@ function attachTimeline(node) {
             setWidget("motion_context_end_seconds", 0);
             refresh(true);
         });
-        mcBar.append(mcLabel, mcNote,
+        mcBar.append(mcThumb, mcLabel, mcNote,
             el("span", { color: COL.text, fontSize: "11px" }, "frames"), mcFrames,
             el("span", { color: COL.text, fontSize: "11px" }, "audio"), mcAudio,
             el("span", { color: COL.text, fontSize: "11px" }, "end"), mcEnd,
@@ -5419,6 +5429,12 @@ function attachTimeline(node) {
             refresh(true);
             toast("v2v source set — " + n.replace(/\s*\[\w+\]\s*$/, ""));
         }, COL.green);
+        makeDropTarget(mcBar, "video/", (n) => {
+            setWidget("motion_context_file", n);
+            setWidget("motion_context_end_seconds", 0);   // new clip, old cut point is meaningless
+            refresh(true);
+            toast("⏭▶ motion context set — the next render continues " + n.replace(/\s*\[\w+\]\s*$/, "") + " with motion + audio");
+        }, COL.green);
 
         function sectionHeadStyle() {
             return {
@@ -6588,14 +6604,37 @@ function attachTimeline(node) {
                 // once a context clip is set
                 mcEnd.disabled = !mf;
                 mcNote.style.display = mf ? "" : "none";
+                mcThumb.style.display = mf ? "" : "none";
+                if (mf) {
+                    const endS = Number(widgetValue(node, "motion_context_end_seconds", 0)) || 0;
+                    const tkey = mf + "|" + endS;
+                    if (mcThumb.dataset.key !== tkey) {
+                        mcThumb.dataset.key = tkey;
+                        mcThumb.src = inputFileUrl(mf);
+                        mcThumb.onloadedmetadata = () => {
+                            const d = isFinite(mcThumb.duration) ? mcThumb.duration : 0;
+                            const t = endS > 0 ? Math.min(endS, d || endS) : d;
+                            mcThumb.currentTime = Math.max(0, t - 0.05);
+                        };
+                    }
+                } else if (mcThumb.dataset.key) {
+                    delete mcThumb.dataset.key;
+                    mcThumb.removeAttribute("src");
+                    mcThumb.load();
+                }
                 if (mf) {
                     const span = mcSpanFrames();
                     const audioOn = (Number(widgetValue(node, "motion_context_audio_frames", 22)) || 0) > 0;
-                    mcNote.style.color = COL.green;
+                    const firstSet = inputConnected(node, "first_frame")
+                        || String(widgetValue(node, "first_frame_file", "")).trim();
+                    mcNote.style.color = firstSet ? COL.mid : COL.green;
                     mcNote.textContent = `· ${span}f (${(span / FPS).toFixed(2)}s) pinned at the head`
                         + (span !== nF ? ` — snapped from ${nF}` : "")
-                        + (audioOn ? " · audio continues" : " · picture only");
-                    mcNote.title = "the render opens by repeating these context frames; 🎞 add-to-reel auto-trims them so an export never duplicates the join";
+                        + (audioOn ? " · audio continues" : " · picture only")
+                        + (firstSet ? " · ⚠ OVERRIDES the start frame" : "");
+                    mcNote.title = firstSet
+                        ? "a start frame is set but the motion context wins — the render opens with the context clip's tail. ✕ the context if you want the start frame back."
+                        : "the render opens by repeating these context frames; 🎞 add-to-reel auto-trims them so an export never duplicates the join";
                 }
             }
             {
