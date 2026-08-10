@@ -712,6 +712,15 @@ Practicalities:
   a decaying gain correction toward the previous clip's closing level,
   export-only, never baked. The ✂ popup's "✨ luma-match join" checkbox
   controls it per clip.
+- Regeneration can also run a few percent **darker per link**, which
+  compounds invisibly down a chain once the joins are smoothed. The same
+  checkbox therefore also applies a **whole-clip level match**: one constant
+  gain (clamped ±20–25%) anchoring each clip's settled brightness to its
+  corrected predecessor, so a chain stays level by construction — verified
+  flat over five links at 4%/link drift. Motion joins are same-scene by
+  definition, so a large level shift there is drift, not intent; on very
+  long chains the clamp saturates gracefully and a chain restart at a
+  natural transition remains the honest fix.
 - The **⏭▶ MOTION bar** holds the dials: frames (snapped down to the VAE's
   5/22/39 run grid) and audio frames (end-aligned with the video window; 0 =
   picture only, needs `audio_vae` otherwise). The pinned span shows hatched
