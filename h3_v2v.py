@@ -32,6 +32,8 @@ from comfy_api.latest import io
 
 from .minimax_h3_guide import (FPS_HINT, _resize, encode_ref_audio, CANVAS_MULTIPLE)
 
+DENOISE_MODES = ["slice (core)", "rescale"]
+
 AUDIO_LATENT_FPS = 40
 TRAINED_MAX_FRAMES = 362   # the empty-latent tooltip's stated trained range
 
@@ -293,8 +295,9 @@ class H3BasicScheduler(io.ComfyNode):
             description=(
                 "Core's BasicScheduler with denoise as a SOCKET, so the Guide "
                 "node's v2v_denoise output can drive the restyle amount over a "
-                "wire: Guide.v2v_denoise -> here -> SamplerCustom's sigmas. Same "
-                "maths as core, drop-in otherwise."),
+                "wire: Guide.v2v_denoise -> here -> SamplerCustom's sigmas. "
+                "'slice' is core's maths exactly; 'rescale' fixes core's dead "
+                "zone at high denoise and suits distilled/turbo schedules."),
             inputs=[
                 io.Model.Input("model"),
                 io.Combo.Input("scheduler", options=comfy.samplers.SCHEDULER_NAMES),
@@ -302,18 +305,58 @@ class H3BasicScheduler(io.ComfyNode):
                 io.Float.Input("denoise", default=1.0, min=0.0, max=1.0,
                                force_input=True,
                                tooltip="Wire the Guide node's v2v_denoise output here (or any float)."),
+                io.Combo.Input("denoise_mode", options=DENOISE_MODES, default="slice (core)",
+                    tooltip=(
+                        "How denoise becomes a schedule.\n\n"
+                        "'slice (core)': what every stock scheduler does — build a "
+                        "denser int(steps/denoise)-step schedule and keep its tail. "
+                        "Because int() truncates, ANY denoise above steps/(steps+1) "
+                        "is silently identical to 1.0 (at 3 steps that's everything "
+                        "above 0.75; at 20 steps, above 0.95), and the step waypoints "
+                        "move — which distilled/turbo LoRAs, trained for one exact "
+                        "trajectory, tend to undershoot (residual noise, flicker).\n\n"
+                        "'rescale': keep the schedule's own shape and step count, "
+                        "compressed into [denoise, 0]. In flow matching sigma IS the "
+                        "noise fraction, so starting at sigma=denoise is exact. The "
+                        "dial then means what it says at every step count, and a "
+                        "turbo trajectory keeps its distilled spacing. Recommended "
+                        "for few-step/turbo v2v and for denoise above ~0.85.")),
             ],
             outputs=[io.Sigmas.Output()],
         )
 
     @classmethod
-    def execute(cls, model, scheduler, steps, denoise) -> io.NodeOutput:
+    def execute(cls, model, scheduler, steps, denoise, denoise_mode="slice (core)") -> io.NodeOutput:
+        if denoise <= 0.0:
+            return io.NodeOutput(torch.FloatTensor([]))
+        ms = model.get_model_object("model_sampling")
+        if denoise_mode == "rescale" and denoise < 1.0:
+            # Same trajectory, compressed into [denoise, 0]: full step count,
+            # distilled spacing preserved, and no truncation dead zone. Valid
+            # because a flow model's sigma is literally the noise fraction of
+            # x = sigma*noise + (1-sigma)*latent, which is what the sampler
+            # seeds with at sigmas[0].
+            sigmas = comfy.samplers.calculate_sigmas(ms, scheduler, steps).cpu()
+            s0 = float(sigmas[0])
+            if s0 <= 0:
+                return io.NodeOutput(sigmas)
+            scaled = sigmas * (float(denoise) / s0)
+            scaled[-1] = sigmas[-1]      # keep the endpoint exactly (0 stays 0)
+            logging.info("H3BasicScheduler: rescale denoise %.3f — %d steps from "
+                         "sigma %.4f (core's slice would have started at %.4f)",
+                         denoise, steps, float(scaled[0]),
+                         float(comfy.samplers.calculate_sigmas(
+                             ms, scheduler, int(steps / denoise)).cpu()[-(steps + 1)]))
+            return io.NodeOutput(scaled)
         total_steps = steps
         if denoise < 1.0:
-            if denoise <= 0.0:
-                return io.NodeOutput(torch.FloatTensor([]))
             total_steps = int(steps / denoise)
-        sigmas = comfy.samplers.calculate_sigmas(
-            model.get_model_object("model_sampling"), scheduler, total_steps).cpu()
+            if total_steps == steps:
+                logging.info("H3BasicScheduler: denoise %.3f at %d steps rounds to a "
+                             "FULL denoise (core's int(steps/denoise) truncation — "
+                             "anything above %.3f does). Switch denoise_mode to "
+                             "'rescale' if you wanted a partial restyle.",
+                             denoise, steps, steps / (steps + 1.0))
+        sigmas = comfy.samplers.calculate_sigmas(ms, scheduler, total_steps).cpu()
         sigmas = sigmas[-(steps + 1):]
         return io.NodeOutput(sigmas)
