@@ -3789,7 +3789,7 @@ function attachTimeline(node) {
         dcSl.type = "range"; dcSl.min = "0"; dcSl.max = "1"; dcSl.step = "0.05";
         Object.assign(dcSl.style, { width: "70px", accentColor: COL.mid, cursor: "pointer" });
         const dcVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" }, "1.00");
-        dcSl.title = "how much of the scramble the SAMPLER is told about, through the v2v_denoise wire. 1.0 (safe): the emitted denoise rises to where the latent actually sits — clean, and the source structure is genuinely gone rather than diluted. Lower: the model is told the latent is cleaner than it is, so it commits fewer steps over already-scrambled content — furthest from the source, grain if pushed.";
+        dcSl.title = "how much of the scramble the SAMPLER is told about, through the v2v_denoise wire. 1.0 (safe): the emitted denoise rises to where the latent actually sits — clean, and the source structure is genuinely gone rather than diluted. Lower: the model is told the latent is cleaner than it is, so it commits fewer steps over already-scrambled content — furthest from the source, grain if pushed. Inert until scramble is above 0 (there is nothing to declare).";
         dcSl.addEventListener("input", () => {
             const v = Math.round(parseFloat(dcSl.value) * 20) / 20;
             setWidget("v2v_noise_declare", v);
@@ -6842,8 +6842,13 @@ function attachTimeline(node) {
                     nzVal.textContent = nzv.toFixed(2);
                 }
                 nzVal.style.color = nzv > 0 ? COL.red : COL.bright;
-                // the declare dial only means anything once something is scrambled
-                dcWrap.style.display = (active && nzv > 0) ? "inline-flex" : "none";
+                // declare keeps its place whatever scramble does — it just goes
+                // inert at scramble 0 (hiding it made the bar jump around)
+                dcWrap.style.display = active ? "inline-flex" : "none";
+                const dcLive = nzv > 0;
+                dcSl.disabled = !dcLive;
+                dcWrap.style.opacity = dcLive ? "1" : "0.45";
+                dcSl.style.cursor = dcLive ? "pointer" : "default";
                 if (document.activeElement !== dcSl) {
                     const dcv = Number(widgetValue(node, "v2v_noise_declare", 1));
                     const dv2 = isFinite(dcv) ? dcv : 1;
