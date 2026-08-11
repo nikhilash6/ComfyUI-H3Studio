@@ -440,6 +440,7 @@ const HELP_COPY = [
 // ============================================================================
 
 const RES_KEY = "h3guide.lastRes";
+const LOCK_KEY = "h3guide.aspectLock";
 
 function attachTimeline(node) {
     // last-used canvas res survives across sessions: a fresh node starts on it.
@@ -2744,19 +2745,68 @@ function attachTimeline(node) {
             });
             return f;
         };
+        // drag a value field up/down to scrub it (ComfyUI number-widget habit).
+        // A drag never focuses the field, so a plain click still types.
+        const dragScrub = (f, { step, min, max, fmt, commit }) => {
+            f.style.cursor = "ns-resize";
+            f.addEventListener("pointerdown", (ev) => {
+                if (document.activeElement === f) return;   // typing: leave it alone
+                ev.preventDefault();
+                const raw = parseFloat(f.value);
+                if (!isFinite(raw)) return;
+                f.setPointerCapture(ev.pointerId);
+                const y0 = ev.clientY, v0 = raw;
+                let moved = false;
+                const move = (e2) => {
+                    const dy = y0 - e2.clientY;
+                    if (!moved && Math.abs(dy) < 3) return;
+                    moved = true;
+                    // shift = fine (single step per notch), else 8px per step
+                    const per = e2.shiftKey ? 16 : 8;
+                    let v = v0 + Math.round(dy / per) * step;
+                    v = Math.min(max, Math.max(min, v));
+                    f.value = fmt(v);
+                };
+                const up = () => {
+                    f.removeEventListener("pointermove", move);
+                    f.removeEventListener("pointerup", up);
+                    f.removeEventListener("pointercancel", up);
+                    if (moved) commit();
+                    else f.focus();      // a click (no drag) types as before
+                };
+                f.addEventListener("pointermove", move);
+                f.addEventListener("pointerup", up);
+                f.addEventListener("pointercancel", up);
+            });
+        };
         const wField = dimField(52), hField = dimField(52), lenField = dimField(58);
         const snapNote = el("span", { color: COL.text, fontSize: "12px", fontFamily: "monospace" });
         // aspect lock: editing one axis derives the other from the ratio captured
-        // at lock time, both snapped to the model's 32px grid
-        let dimLock = false, lockRatio = 1344 / 768;
-        const lockBtn = el("button", { ...btnStyle, padding: "1px 7px" }, "🔓");
-        lockBtn.title = "lock aspect: editing width derives height (and vice versa), both on the 32px grid";
+        // at lock time, both snapped to the model's 32px grid. Sticky across
+        // sessions (same localStorage habit as the last-used res).
+        const savedLock = (() => {
+            try { return JSON.parse(localStorage.getItem(LOCK_KEY)) || null; }
+            catch (e) { return null; }
+        })();
+        let dimLock = !!savedLock?.on;
+        let lockRatio = Number(savedLock?.ratio) > 0 ? Number(savedLock.ratio) : 1344 / 768;
+        const lockBtn = el("button", { ...btnStyle, padding: "1px 7px" },
+            dimLock ? "🔒" : "🔓");
+        lockBtn.style.color = dimLock ? COL.green : COL.bright;
+        lockBtn.title = "lock aspect: editing width derives height (and vice versa), both on the 32px grid. Remembered between sessions.";
+        const saveLock = () => {
+            try {
+                localStorage.setItem(LOCK_KEY,
+                    JSON.stringify({ on: dimLock, ratio: lockRatio }));
+            } catch (e) { /* private mode */ }
+        };
         lockBtn.addEventListener("click", () => {
             dimLock = !dimLock;
             const [w, h] = outWH();
-            lockRatio = w / h;
+            lockRatio = w / h;   // locking captures the ratio you're looking at
             lockBtn.textContent = dimLock ? "🔒" : "🔓";
             lockBtn.style.color = dimLock ? COL.green : COL.bright;
+            saveLock();
         });
         const wMax = () => getWidget(node, "width")?.options?.max ?? 16384;
         const r32 = (v) => Math.min(wMax(), Math.max(32, Math.round(v / 32) * 32));
@@ -2795,6 +2845,17 @@ function attachTimeline(node) {
             fill();
         };
         for (const f of [wField, hField, lenField]) f.addEventListener("blur", commitDims);
+        // drag the boxes instead of typing: w/h in 32px units (the model's
+        // grid), length in whole seconds — commitDims applies the same
+        // snapping, aspect lock and length rules either way
+        dragScrub(wField, { step: 32, min: 32, max: wMax(),
+            fmt: (v) => String(r32(v)), commit: commitDims });
+        dragScrub(hField, { step: 32, min: 32, max: wMax(),
+            fmt: (v) => String(r32(v)), commit: commitDims });
+        dragScrub(lenField, { step: 1, min: 0.2, max: 150,
+            fmt: (v) => v.toFixed(1) + "s", commit: commitDims });
+        wField.title = hField.title = "drag up/down to change (Shift = finer), or click to type — snaps to the model's 32px grid";
+        lenField.title = "drag up/down to change the clip length in seconds (Shift = finer), or click to type ('5.2' or '124f')";
         // aspect presets: dims computed at the trained-area budget (768*1344)
         // for the chosen ratio, both axes snapped to the 32 grid
         const ASPECTS = [["16:9", 16 / 9], ["9:16", 9 / 16], ["1:1", 1],
