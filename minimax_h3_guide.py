@@ -49,7 +49,10 @@ import nodes
 import node_helpers
 from comfy_api.latest import ComfyExtension, io, InputImpl
 
-from . import extra_conds_patch, h3_row_aug_patch, middle_frame_patch, turbo_compat
+import comfy.model_management
+
+from . import (extra_conds_patch, h3_latent_cache, h3_row_aug_patch,
+               middle_frame_patch, turbo_compat)
 
 try:
     from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP as _VIS_T
@@ -159,6 +162,51 @@ def mc_step_offsets(latent_t):
 def mc_pixel_frames(latent_t):
     """Pixel frames covered by latent_t latent steps of a video run."""
     return sum(MC_FRAME_PER_TOKEN[k % 5] for k in range(latent_t))
+
+
+def mc_slice_from_latent(entry, run, cut_frame):
+    """Take a run's worth of steps out of a cached clip's TAIL latent.
+
+    The alternative to re-encoding: the previous clip's own latent is the
+    model's output, so slicing it skips decode -> encode entirely.
+
+    A clip's latent always has T = 2 (mod 5) steps (the 17k+5 frame grid), so
+    the LAST 2/7/12 steps always begin at temporal phase 0 and cover exactly
+    5/22/39 frames -- identical in layout to freshly encoding that tail. A cut
+    mid-clip can start at any phase, so offsets come from each step's real
+    phase rather than being assumed.
+
+    Only the tail is cached (see h3_latent_cache.KEEP_VIDEO_STEPS), so indices
+    are computed against the WHOLE clip and then mapped into the buffer;
+    anything reaching further back than the buffer returns None and the caller
+    re-encodes.
+
+    Returns (blocks, offsets, span) or None.
+    """
+    lat = entry["video"]
+    T = int(entry.get("t_total") or lat.shape[2])
+    kept = int(entry.get("kept") or lat.shape[2])
+    base = T - kept                    # global index of the buffer's first step
+    n_steps = next((n for n in range(1, T + 1) if mc_pixel_frames(n) == run), None)
+    if n_steps is None or n_steps > T:
+        return None
+    # which step covers the last frame we're continuing from
+    ends, acc = [], 0
+    for k in range(T):
+        acc += MC_FRAME_PER_TOKEN[k % 5]
+        ends.append(acc - 1)           # last pixel frame this step covers
+    target = min(max(0, int(cut_frame) - 1), ends[-1])
+    j = next(k for k in range(T) if ends[k] >= target)
+    i0 = j - n_steps + 1
+    if i0 < base or j >= T:
+        return None                    # outside the cached tail
+    blocks = [lat[:, :, k - base:k - base + 1] for k in range(i0, j + 1)]
+    # offsets from the sliced steps' own phases, rebased to 0
+    offs, a = [], 0
+    for k in range(i0, j + 1):
+        offs.append(a)
+        a += MC_FRAME_PER_TOKEN[k % 5]
+    return blocks, offs, a
 
 
 def parse_ref_spec(spec, count, field="ref_spec"):
@@ -705,6 +753,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="Scramble the v2v footage BEFORE sampling: the latent is blended toward noise by this fraction (0 = untouched footage). This is the dial for 'the restyle keeps handing me back the same material'. Raising denoise alone often can't break it: the footage's structure is CORRELATED across frames while the sampler's noise is not, so the model integrates the source back out of the noise. Destroying the structure up front is the one thing it cannot undo. 0.3-0.6 keeps timing and rough motion while freeing content."),
                 io.Float.Input("v2v_noise_declare", default=1.0, min=0.0, max=1.0, step=0.05,
                     tooltip="How much of v2v_noise is DECLARED to the sampler through the v2v_denoise output (the sigma dial).\n\n1.0 (default, safe): the emitted denoise is raised so the schedule starts where the latent actually is -- clean output, and the net effect is like a higher denoise except the source structure is genuinely gone rather than merely diluted.\n\nBelow 1.0: the sampler is told the latent is cleaner than it really is, so it commits fewer/gentler steps over already-scrambled content -- the furthest you can get from the source, at the cost of grain if you push it (undeclared noise has to land somewhere).\n\nNeeds the v2v_denoise output wired to H3 Basic Scheduler, and does nothing unless v2v_noise is above 0."),
+                io.Boolean.Input("motion_context_reuse_latent", default=True,
+                    tooltip="When the clip you're continuing is a render THIS SESSION just made, pin its latent directly instead of decoding the file and re-encoding it. That removes a whole VAE round trip per link -- the loss that compounds and softens a long chain -- and pins the model's own output rather than a lossy copy of it. Falls back to re-encoding automatically, with the reason in the log, whenever the cached latent isn't the right clip, canvas or cut point. Only the tail is held in memory (a few MB). Turn off to force the file path."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -809,6 +859,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 motion_context_file="", motion_context_end_seconds=0.0,
                 motion_context_frames=22, motion_context_audio_frames=22,
                 v2v_noise=0.0, v2v_noise_declare=1.0,
+                motion_context_reuse_latent=True,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -976,6 +1027,11 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         # sub-1.0 label machinery.
         mc_file = (motion_context_file or "").strip()
         mc_keyframes, mc_span, mc_audio_block = [], 0, None
+        if mc_file and motion_context_reuse_latent:
+            # arm the session cache so THIS render's latent is kept for the
+            # NEXT link — capture stays idle until a chain is actually running
+            if h3_latent_cache.install():
+                h3_latent_cache.arm()
         if mc_file:
             if not middle_frame_patch.install():
                 raise RuntimeError(
@@ -1009,21 +1065,51 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     "MiniMax H3 Guide: motion context of %d frames into a %d-frame clip "
                     "-- the pinned run must be a small fraction of the timeline. "
                     "Lengthen the clip or lower motion_context_frames." % (run, frame_count))
-            # snap BEFORE slicing: encoding an off-grid count would make the VAE
-            # keep the FIRST covered frames of the slice, ending the pinned run
-            # early and shifting the join by the difference
-            tail = _resize(mc_frames[cut - run:cut], width, height, "disabled")
-            enc = vae.encode(tail)
-            steps = int(enc.shape[2])
-            if mc_pixel_frames(steps) != run:
-                raise RuntimeError(
-                    "MiniMax H3 Guide: %d context frames encoded to %d latent steps "
-                    "covering %d -- the video VAE's downscale grid changed upstream. "
-                    "Refusing to render a shifted join." % (run, steps, mc_pixel_frames(steps)))
-            offsets = mc_step_offsets(steps)
-            mc_keyframes = [{"resolved_frame_index": offsets[k],
-                             "latent": enc[:, :, k:k + 1]} for k in range(steps)]
-            mc_span = run
+            # Best case: this clip is the render we just made and its latent is
+            # still in the session cache -- pin THAT instead of decoding the
+            # file and re-encoding it. Skips a full VAE round trip per link,
+            # which is the loss that compounds down a chain.
+            mc_cached = None
+            if motion_context_reuse_latent:
+                h3_latent_cache.install()
+                entry, why = h3_latent_cache.matches(mc_file, width, height)
+                if entry is not None:
+                    got = mc_slice_from_latent(entry, run, cut)
+                    if got is None:
+                        logging.info("MiniMaxH3Guide: cached latent can't serve a "
+                                     "%d-frame run ending at frame %d — re-encoding.",
+                                     run, cut)
+                    else:
+                        mc_cached = (entry, got)
+                else:
+                    logging.info("MiniMaxH3Guide: motion context re-encoding (%s).", why)
+
+            if mc_cached is not None:
+                entry, (blocks, offsets, span) = mc_cached
+                dev = comfy.model_management.intermediate_device()
+                mc_keyframes = [{"resolved_frame_index": offsets[k],
+                                 "latent": blocks[k].to(dev)}
+                                for k in range(len(blocks))]
+                mc_span = span
+                logging.info("MiniMaxH3Guide: motion context taken straight from "
+                             "the cached latent — no VAE round trip this link "
+                             "(%d steps, %d frames).", len(blocks), span)
+            else:
+                # snap BEFORE slicing: encoding an off-grid count would make the VAE
+                # keep the FIRST covered frames of the slice, ending the pinned run
+                # early and shifting the join by the difference
+                tail = _resize(mc_frames[cut - run:cut], width, height, "disabled")
+                enc = vae.encode(tail)
+                steps = int(enc.shape[2])
+                if mc_pixel_frames(steps) != run:
+                    raise RuntimeError(
+                        "MiniMax H3 Guide: %d context frames encoded to %d latent steps "
+                        "covering %d -- the video VAE's downscale grid changed upstream. "
+                        "Refusing to render a shifted join." % (run, steps, mc_pixel_frames(steps)))
+                offsets = mc_step_offsets(steps)
+                mc_keyframes = [{"resolved_frame_index": offsets[k],
+                                 "latent": enc[:, :, k:k + 1]} for k in range(steps)]
+                mc_span = run
 
             # audio context: the tail waveform ending at the SAME instant as the
             # pinned video, so both finish at the join. It rides the reference
@@ -1031,7 +1117,29 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             # coordinates onto this clip's own timeline (ending at frame
             # mc_span), which is what turns imitation into continuation.
             a_frames = int(motion_context_audio_frames)
-            if a_frames > 0:
+            if a_frames > 0 and mc_cached is not None:
+                # the cached latent carries the audio stream too: slice the tail
+                # steps directly and the audio VAE round trip goes as well
+                ent = mc_cached[0]
+                a_lat = ent["audio"]                       # tail buffer
+                a_total = int(ent.get("a_total") or a_lat.shape[-1])
+                a_base = a_total - int(ent.get("a_kept") or a_lat.shape[-1])
+                rt_a = max(1, min(a_total, int(round(a_frames / FPS_HINT * 40.0))))
+                # global end step: the clip end, or the cut point when trimmed
+                end_g = a_total if cut >= ent["frames"] else \
+                    max(rt_a, min(a_total, int(round(cut / FPS_HINT * 40.0))))
+                start_g = end_g - rt_a
+                if start_g < a_base:                       # older than the buffer
+                    start_g, rt_a = a_base, end_g - a_base
+                z_a = a_lat[..., start_g - a_base:end_g - a_base].to(
+                    comfy.model_management.intermediate_device())
+                mc_audio_block = {"kind": "audio", "ref_audio_t": int(z_a.shape[-1]),
+                                  "audio_latent": z_a,
+                                  MC_AUDIO_END_KEY: float(mc_span)}
+                logging.info("MiniMaxH3Guide: motion context audio sliced from the "
+                             "cached latent too — %d steps, no audio VAE round "
+                             "trip.", int(z_a.shape[-1]))
+            elif a_frames > 0:
                 if mc_snd is None or mc_snd.get("waveform") is None:
                     logging.info("MiniMaxH3Guide: motion context source %r has no "
                                  "soundtrack -- audio context skipped.", mc_file)
