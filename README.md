@@ -708,10 +708,10 @@ Practicalities:
 - The model's first generated frames after the pinned block **zigzag in
   brightness** (measured ~8% bright for a frame, then ~10% dark, converging
   within half a second) — a tiny flash on a hard cut, most visible in dark
-  scenes. Export **luma-matches** the join automatically for motion clips:
-  a decaying gain correction toward the previous clip's closing level,
-  export-only, never baked. The ✂ popup's "✨ luma-match join" checkbox
-  controls it per clip.
+  scenes. The ✂ popup's **"✨ luma-match join"** checkbox (off by default —
+  it alters picture, so it is opt-in) corrects it: a decaying gain toward
+  the previous clip's closing level over the first half-second,
+  export-only, never baked.
 - The **⏭▶ MOTION bar** holds the dials: frames (snapped down to the VAE's
   5/22/39 run grid) and audio frames (end-aligned with the video window; 0 =
   picture only, needs `audio_vae` otherwise). The pinned span shows hatched

@@ -3116,8 +3116,9 @@ function attachTimeline(node) {
                         if (runSetup) e2.setup = runSetup;   // the clip remembers its recipe
                         if (renderedSpan > 0) {
                             // the render opens with the pinned context head — trim
-                            // it non-destructively and mark for join luma-match
-                            e2.mc = true;
+                            // it non-destructively. The join luma-match is NOT
+                            // armed here: it alters picture, so it stays opt-in
+                            // per clip (✨ in the ✂ popup).
                             if (!(e2.in > 0)) e2.in = renderedSpan / FPS;
                         }
                         reelSet(l);
@@ -3146,8 +3147,9 @@ function attachTimeline(node) {
                         const i = findTarget();
                         if (i < 0) { toast("that reel card is gone — use add to reel instead", true); return; }
                         const l = reelGet();
+                        // keeps the card's own ✨ choice; only the trim follows
+                        // the new take
                         l[i] = { ...l[i], name, setup: runSetup || l[i].setup,
-                            mc: renderedSpan > 0,
                             in: renderedSpan > 0 ? renderedSpan / FPS : 0, out: 0 };
                         reelSet(l);
                         state.reelTarget = null;
@@ -3501,10 +3503,8 @@ function attachTimeline(node) {
             const e3 = l[l.length - 1];
             if (e3?.name === r.name) {
                 if (r.runSetup) e3.setup = r.runSetup;
-                if (r.renderedSpan > 0) {
-                    e3.mc = true;
-                    if (!(e3.in > 0)) e3.in = r.renderedSpan / FPS;
-                }
+                // head trim yes, luma-match no — see the manual add path
+                if (r.renderedSpan > 0 && !(e3.in > 0)) e3.in = r.renderedSpan / FPS;
                 reelSet(l);
             }
             if (r.reelB) { r.reelB.textContent = "✓ in reel"; r.reelB.disabled = true; }

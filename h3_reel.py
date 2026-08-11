@@ -28,13 +28,12 @@ import torch
 MAX_TOTAL_FRAMES = 4320   # ~3 minutes at 24fps — keeps the concat in RAM sane
 SUBDIR = "h3reel"
 
-# Join flicker fix: OFF. _luma_match below is kept intact and still measured
-# sound (the +8%/-10% zigzag at the first generated frames after a pinned
-# context block is real), but it is disabled at Peter's request pending more
-# renders — a correction that touches picture should not run on every export
-# on the strength of one measurement. Flip this to True to re-enable; the ✂
-# popup's per-clip checkbox still records intent either way.
-LUMA_FIX_ENABLED = False
+# Join flicker fix: available, but OPT-IN per clip. The zigzag it corrects is
+# real (+8%/-10% at the first generated frames after a pinned context block),
+# but a correction that alters picture shouldn't run on every export by
+# default — tick "✨ luma-match join" in a clip's ✂ popup to use it. This
+# constant is the master off-switch if it ever needs killing outright.
+LUMA_FIX_ENABLED = True
 
 
 def _conform(audio, sr, channels):
