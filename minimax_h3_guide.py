@@ -43,6 +43,7 @@ import torch
 import torchaudio
 from PIL import Image, ImageOps
 
+import comfy.nested_tensor
 import folder_paths
 import nodes
 import node_helpers
@@ -126,6 +127,7 @@ REF_NOISE_SEED_BASE = 200
 REF_AUDIO_NOISE_SEED_BASE = 300
 REF_VIDEO_NOISE_SEED_BASE = 400
 REF_VIDEO_AUDIO_NOISE_SEED_BASE = 500
+V2V_NOISE_SEED = 600      # v2v structure scramble (video then audio stream)
 REF_VIDEO_MAX_SECONDS = 15  # core's stated trained range for reference videos
 CANVAS_MULTIPLE = 32
 REF_IMAGE_SHORT_EDGE = 2048
@@ -699,6 +701,10 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="How many tail frames to pin. The video VAE only distinguishes runs of 5, 22 and 39 -- anything else snaps DOWN to the nearest. 22 (default) is nearly seamless; 5 is just barely fluid but much cheaper; 39 is untested. Every pinned row rides through all sampling steps, so this is also a speed dial."),
                 io.Int.Input("motion_context_audio_frames", default=22, min=0, max=240,
                     tooltip="Tail AUDIO to pin, in frames at 24 fps, END-ALIGNED with the pinned video so both finish at the join -- the model continues the actual waveform (same recording) instead of playing a sound-alike. 0 = no audio context. Needs audio_vae when above 0 and the context video has sound. 22 overlays the video window exactly (the tested configuration)."),
+                io.Float.Input("v2v_noise", default=0.0, min=0.0, max=1.0, step=0.05,
+                    tooltip="Scramble the v2v footage BEFORE sampling: the latent is blended toward noise by this fraction (0 = untouched footage). This is the dial for 'the restyle keeps handing me back the same material'. Raising denoise alone often can't break it: the footage's structure is CORRELATED across frames while the sampler's noise is not, so the model integrates the source back out of the noise. Destroying the structure up front is the one thing it cannot undo. 0.3-0.6 keeps timing and rough motion while freeing content."),
+                io.Float.Input("v2v_noise_declare", default=1.0, min=0.0, max=1.0, step=0.05,
+                    tooltip="How much of v2v_noise is DECLARED to the sampler through the v2v_denoise output (the sigma dial).\n\n1.0 (default, safe): the emitted denoise is raised so the schedule starts where the latent actually is -- clean output, and the net effect is like a higher denoise except the source structure is genuinely gone rather than merely diluted.\n\nBelow 1.0: the sampler is told the latent is cleaner than it really is, so it commits fewer/gentler steps over already-scrambled content -- the furthest you can get from the source, at the cost of grain if you push it (undeclared noise has to land somewhere).\n\nNeeds the v2v_denoise output wired to H3 Basic Scheduler, and does nothing unless v2v_noise is above 0."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -802,6 +808,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 v2v_crop="", v2v_denoise=0.55,
                 motion_context_file="", motion_context_end_seconds=0.0,
                 motion_context_frames=22, motion_context_audio_frames=22,
+                v2v_noise=0.0, v2v_noise_declare=1.0,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -888,6 +895,21 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                          "footage (%d frames, %.1fs); the length widget is ignored. "
                          "Sample at denoise 0.3-0.7 to restyle.",
                          frame_count, frame_count / FPS_HINT)
+            # Structure scramble: blend the footage latent toward noise BEFORE
+            # the sampler sees it. Raising denoise alone can't reliably break
+            # the source, because the footage is correlated along the time axis
+            # while the sampler's noise is i.i.d. per frame -- the model
+            # integrates the structure back out. Destroying it here is the one
+            # thing sampling cannot undo.
+            b = max(0.0, min(1.0, float(v2v_noise)))
+            if b > 0.0:
+                parts = list(latent["samples"].unbind())
+                parts = [flow_blend(p, 1.0 - b, V2V_NOISE_SEED + i)
+                         for i, p in enumerate(parts)]
+                latent = {"samples": comfy.nested_tensor.NestedTensor(tuple(parts))}
+                logging.info("MiniMaxH3Guide: v2v latent scrambled %.0f%% toward noise "
+                             "(%.0f%% of the footage structure left).", b * 100,
+                             (1.0 - b) * 100)
         else:
             latent, frame_count = _empty_av_latent(width, height, length)
 
@@ -1324,7 +1346,23 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 "minimax_keyframes": keyframes,
                 "minimax_frame_count": frame_count,
             })
-        return io.NodeOutput(cond, latent, float(v2v_denoise))
+        # The sigma dial: injected noise raises where the latent ACTUALLY sits on
+        # the flow path. Composing "footage noised to b" with the sampler's own
+        # start d puts the signal at (1-d)(1-b), i.e. an effective time of
+        # 1-(1-d)(1-b). Declaring all of it (1.0) hands the scheduler an honest
+        # start -> clean; declaring less makes the model commit fewer steps over
+        # already-scrambled content -> the furthest from the source, grain the
+        # price. Only meaningful when a v2v source was actually noised.
+        out_denoise = float(v2v_denoise)
+        if v2v_frames is not None and float(v2v_noise) > 0.0:
+            b = max(0.0, min(1.0, float(v2v_noise)))
+            eff = 1.0 - (1.0 - out_denoise) * (1.0 - b)
+            declare = max(0.0, min(1.0, float(v2v_noise_declare)))
+            out_denoise = min(1.0, out_denoise + declare * (eff - out_denoise))
+            logging.info("MiniMaxH3Guide: v2v_denoise %.2f + noise %.2f declared "
+                         "%.0f%% -> emitting %.3f (the latent truly sits at %.3f).",
+                         float(v2v_denoise), b, declare * 100, out_denoise, eff)
+        return io.NodeOutput(cond, latent, out_denoise)
 
 
 class MiniMaxH3GuideExtension(ComfyExtension):

@@ -332,6 +332,7 @@ const SETUP_FIELDS = [
     "v2v_crop", "v2v_denoise",
     "motion_context_file", "motion_context_end_seconds",
     "motion_context_frames", "motion_context_audio_frames",
+    "v2v_noise", "v2v_noise_declare",
     "mask_ref_pixels",
 ];
 
@@ -349,6 +350,7 @@ const SETUP_DEFAULTS = {
     v2v_crop: "", v2v_denoise: 0.55,
     motion_context_file: "", motion_context_end_seconds: 0.0,
     motion_context_frames: 22, motion_context_audio_frames: 22,
+    v2v_noise: 0.0, v2v_noise_declare: 1.0,
     mask_ref_pixels: false,
 };
 
@@ -3762,6 +3764,40 @@ function attachTimeline(node) {
         });
         dnSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
         dnWrap.append(dnSl, dnVal);
+        // structure scramble: the answer to "the restyle keeps giving me the
+        // same material back" — denoise alone can't break temporally-correlated
+        // footage, so dilute the latent itself, then choose how much of that
+        // the sampler is told about
+        const nzWrap = el("span", { display: "none", alignItems: "center", gap: "5px" });
+        nzWrap.appendChild(el("span", { color: COL.text, fontSize: "11px" }, "scramble"));
+        const nzSl = el("input");
+        nzSl.type = "range"; nzSl.min = "0"; nzSl.max = "0.95"; nzSl.step = "0.05";
+        Object.assign(nzSl.style, { width: "80px", accentColor: COL.red, cursor: "pointer" });
+        const nzVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" }, "0.00");
+        nzSl.title = "blend the footage latent toward noise BEFORE sampling. Raising denoise alone often can't stop v2v handing back the same content (the footage is correlated across frames, the sampler's noise isn't, so the model integrates the source back out) — this destroys the structure up front, which sampling can't undo. 0.3–0.6 keeps timing and rough motion while freeing content.";
+        nzSl.addEventListener("input", () => {
+            const v = Math.round(parseFloat(nzSl.value) * 20) / 20;
+            setWidget("v2v_noise", v);
+            nzVal.textContent = v.toFixed(2);
+            fill();
+        });
+        nzSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        nzWrap.append(nzSl, nzVal);
+        const dcWrap = el("span", { display: "none", alignItems: "center", gap: "5px" });
+        dcWrap.appendChild(el("span", { color: COL.text, fontSize: "11px" }, "declare"));
+        const dcSl = el("input");
+        dcSl.type = "range"; dcSl.min = "0"; dcSl.max = "1"; dcSl.step = "0.05";
+        Object.assign(dcSl.style, { width: "70px", accentColor: COL.mid, cursor: "pointer" });
+        const dcVal = el("span", { color: COL.bright, fontFamily: "monospace", fontSize: "12px" }, "1.00");
+        dcSl.title = "how much of the scramble the SAMPLER is told about, through the v2v_denoise wire. 1.0 (safe): the emitted denoise rises to where the latent actually sits — clean, and the source structure is genuinely gone rather than diluted. Lower: the model is told the latent is cleaner than it is, so it commits fewer steps over already-scrambled content — furthest from the source, grain if pushed.";
+        dcSl.addEventListener("input", () => {
+            const v = Math.round(parseFloat(dcSl.value) * 20) / 20;
+            setWidget("v2v_noise_declare", v);
+            dcVal.textContent = v.toFixed(2);
+            fill();
+        });
+        dcSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        dcWrap.append(dcSl, dcVal);
         const v2vDenoise = el("span", {
             color: COL.mid, fontSize: "12px", display: "none", whiteSpace: "nowrap",
         }, "→ wire v2v_denoise → H3 Basic Scheduler");
@@ -3770,7 +3806,8 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "section"),
             v2vStart, el("span", { color: COL.text, fontSize: "11px" }, "→"), v2vEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            v2vScrub, v2vMatchB, v2vFrame, ghostWrap, dnWrap, v2vPick, v2vClear, v2vDenoise);
+            v2vScrub, v2vMatchB, v2vFrame, ghostWrap, dnWrap, nzWrap, dcWrap,
+            v2vPick, v2vClear, v2vDenoise);
 
         // motion-context strip: continue a clip with real motion + the same
         // audio (⏭▶ on reel cards / the render dock writes these widgets; this
@@ -6798,6 +6835,21 @@ function attachTimeline(node) {
                     dnSl.value = String(dv);
                     dnVal.textContent = dv.toFixed(2);
                 }
+                const nzv = Number(widgetValue(node, "v2v_noise", 0)) || 0;
+                nzWrap.style.display = active ? "inline-flex" : "none";
+                if (document.activeElement !== nzSl) {
+                    nzSl.value = String(nzv);
+                    nzVal.textContent = nzv.toFixed(2);
+                }
+                nzVal.style.color = nzv > 0 ? COL.red : COL.bright;
+                // the declare dial only means anything once something is scrambled
+                dcWrap.style.display = (active && nzv > 0) ? "inline-flex" : "none";
+                if (document.activeElement !== dcSl) {
+                    const dcv = Number(widgetValue(node, "v2v_noise_declare", 1));
+                    const dv2 = isFinite(dcv) ? dcv : 1;
+                    dcSl.value = String(dv2);
+                    dcVal.textContent = dv2.toFixed(2);
+                }
                 v2vNote.style.display = active ? "" : "none";
                 if (active && v2vCrop) {
                     v2vNote.style.color = COL.green;
@@ -7367,7 +7419,8 @@ function attachTimeline(node) {
         "ref_audio_files", "ref_video_spec", "ref_video_files", "ref_video_crops",
         "v2v_video_file", "v2v_start_seconds", "v2v_end_seconds", "v2v_crop", "v2v_denoise",
         "motion_context_file", "motion_context_end_seconds",
-        "motion_context_frames", "motion_context_audio_frames"];
+        "motion_context_frames", "motion_context_audio_frames",
+        "v2v_noise", "v2v_noise_declare"];
     let rawVisible = false;
     for (const name of HIDDEN_WIDGETS) setWidgetVisible(node, getWidget(node, name), false);
     node.addWidget("button", "⤢ open timeline editor", null, openFullscreen);
