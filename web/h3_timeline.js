@@ -1574,47 +1574,29 @@ function attachTimeline(node) {
     // ---- final-frame extraction: chain from any footage in one click --------
     // Decodes the video's last frame in the browser, uploads it as a PNG and
     // hands back the input-folder name. File videos only (sockets have no URL).
-    function extractLastFrame(name, onDone, atSeconds) {
+    async function extractLastFrame(name, onDone, atSeconds) {
+        // Server-side, deliberately. Doing this in the browser (a <video>
+        // drawn to a canvas) made Chrome apply its own YUV->RGB conversion:
+        // measured across 16 files, every frame came out 1.0-3.2 levels
+        // brighter than the one the model actually rendered, because the clips
+        // carry no colour-range/matrix tags for decoders to agree on — and
+        // chaining on a mis-levelled frame feeds that error into every link.
+        // The route uses the same decode the conditioning path uses.
         toast("extracting final frame…");
-        const vv = document.createElement("video");
-        vv.muted = true;
-        vv.preload = "auto";
-        vv.src = inputFileUrl(name);
-        const stop = () => { vv.removeAttribute("src"); vv.load(); };
-        const fail = (why) => {
-            stop();
-            toast("could not extract the final frame — " + why
+        try {
+            const ps = new URLSearchParams({ name });
+            if (atSeconds && atSeconds > 0) ps.set("t", String(atSeconds));
+            const r = await api.fetchApi("/h3guide/extract_frame?" + ps.toString());
+            const j = await r.json();
+            if (j.error) throw new Error(j.error);
+            // deterministic name + overwrite: a cached thumb would show the OLD frame
+            state.imgCache.delete(previewFileUrl(j.name));
+            state.imgCache.delete(inputFileUrl(j.name));
+            onDone(j.name);
+        } catch (e) {
+            toast("could not extract the final frame — " + (e?.message || e)
                 + ". Graph fallback: Load Video → Get Video Components → Image From Batch.", true);
-        };
-        vv.addEventListener("error", () => fail("the browser can't decode this file"));
-        vv.addEventListener("loadedmetadata", () => {
-            if (!isFinite(vv.duration) || vv.duration <= 0) return fail("no duration reported");
-            // a hair before the end: seeking to exactly duration can land past
-            // the last decodable frame in some containers
-            const target = (atSeconds && atSeconds > 0)
-                ? Math.min(atSeconds, vv.duration) : vv.duration;
-            vv.currentTime = Math.max(0, target - 0.001);
-        }, { once: true });
-        vv.addEventListener("seeked", async () => {
-            try {
-                if (!vv.videoWidth) return fail("no video track");
-                const cnv = document.createElement("canvas");
-                cnv.width = vv.videoWidth;
-                cnv.height = vv.videoHeight;
-                cnv.getContext("2d").drawImage(vv, 0, 0);
-                const blob = await new Promise((res, rej) =>
-                    cnv.toBlob((b) => b ? res(b) : rej(new Error("frame not decodable")), "image/png"));
-                const base = name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop().replace(/\.[^.]+$/, "");
-                const fname = await uploadBlob(blob, `h3-final-${base}.png`, true);
-                // deterministic name + overwrite: a cached thumb would show the OLD frame
-                state.imgCache.delete(previewFileUrl(fname));
-                state.imgCache.delete(inputFileUrl(fname));
-                stop();
-                onDone(fname);
-            } catch (e) {
-                fail(e.message);
-            }
-        }, { once: true });
+        }
     }
 
     // ---- the reel: an ordered chain of clips, persisted per node -----------
@@ -4415,9 +4397,9 @@ function attachTimeline(node) {
                 const lmCb = el("input");
                 lmCb.type = "checkbox";
                 lmCb.checked = cur.mc;
-                lmWrap.title = "at export, gain-correct this clip's first half-second toward the previous clip's closing brightness — fixes the tiny flash where a ⏭▶ motion continuation takes over (set automatically when a motion render is 🎞-added; harmless on normal cuts, but usually wanted only on continuation joins)";
+                lmWrap.title = "EXPORT ONLY, off by default. Matches this clip's brightness to the clip before it, two ways: a whole-clip gain putting its settled level on the previous clip's closing level (continuations measured 1-3% darker per link, which compounds down a chain), plus a decaying correction over the first half-second for the flash where a ⏭▶ motion continuation takes over. Nothing is baked — untick and re-export to compare.";
                 lmCb.addEventListener("change", () => { cur.mc = lmCb.checked; commit(); });
-                lmWrap.append(lmCb, el("span", null, "✨ luma-match join"));
+                lmWrap.append(lmCb, el("span", null, "✨ match brightness to previous"));
                 const readout = el("span", { color: COL.text, fontSize: "12px", flex: "1" });
                 bar.append(playB, inB, outB, wholeB, lmWrap, readout);
                 panel.append(head, vv, strip2, bar);

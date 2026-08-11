@@ -102,6 +102,58 @@ def register():
                         files.append((e.stat().st_mtime, rp))
         return dirs, files
 
+    @routes.get("/h3guide/extract_frame")
+    async def h3guide_extract_frame(request):
+        """A clip's frame as a PNG, decoded by the SAME PyAV path the render
+        uses. The editor used to do this in the browser (a <video> drawn to a
+        canvas), which made Chrome apply its own YUV->RGB conversion: measured
+        across 16 files, every extracted frame came out 1.0-3.2 levels
+        BRIGHTER than the frame the model actually produced, because our clips
+        carry no colour-range/matrix tags for a decoder to agree on. Chaining
+        on a mis-levelled frame injects that error into the next render, every
+        link. Decoding server-side makes the handoff exact."""
+        q = request.rel_url.query
+        name = q.get("name", "")
+        if not name:
+            return web.json_response({"error": "no name"}, status=400)
+        try:
+            payload, status = await asyncio.to_thread(_extract_frame, name, q.get("t"))
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            import logging
+            logging.exception("MiniMaxH3Guide: frame extraction failed")
+            return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
+                                     status=500)
+        return web.json_response(payload, status=status)
+
+    def _extract_frame(name, t):
+        import logging
+        import numpy as np
+        from .minimax_h3_guide import FPS_HINT, load_input_video
+        # same decode + 24fps resample the conditioning path uses, so the saved
+        # frame is bit-for-bit what the model would have been handed
+        frames, _ = load_input_video(name, "frame extraction", max_seconds=None)
+        n = int(frames.shape[0])
+        idx = n - 1
+        if t:
+            try:
+                secs = float(t)
+            except ValueError:
+                secs = 0.0
+            if secs > 0:
+                idx = max(0, min(n - 1, int(round(secs * FPS_HINT)) - 1))
+        arr = (frames[idx].cpu().numpy() * 255.0).round().clip(0, 255).astype("uint8")
+        base = os.path.basename(name.split("[")[0].strip().replace("\\", "/"))
+        base = os.path.splitext(base)[0]
+        out = "h3-final-%s.png" % base
+        path = os.path.join(folder_paths.get_input_directory(), out)
+        Image.fromarray(arr).save(path)
+        logging.info("MiniMaxH3Guide: extracted frame %d/%d of %r -> %s "
+                     "(server-side decode, mean level %.2f)",
+                     idx + 1, n, name, out, float(arr.mean()))
+        return {"name": out, "frame": idx, "frames": n}, 200
+
     @routes.get("/h3guide/preview")
     async def h3guide_preview(request):
         q = request.rel_url.query

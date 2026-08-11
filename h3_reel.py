@@ -76,6 +76,40 @@ def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
     return wf
 
 
+def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
+    """Whole-clip exposure anchor: ONE clamped constant gain putting this
+    clip's settled level (frames 12-36, past the join zigzag) on its
+    predecessor's closing level.
+
+    Measured across Peter's chained renders, every continuation came out
+    darker than its source -- typically 1-3% per link, worst 8% -- which
+    compounds invisibly down a chain because each join is smooth. Anchoring
+    each clip to its ALREADY-CORRECTED predecessor stops the accumulation by
+    construction. Renders continue from the RAW previous file, so the gain has
+    to undo cumulative drift; hence the generous clamp, safe here because
+    continuations are same-scene by construction. Beyond it the correction
+    saturates rather than overcooking, and a chain restart at a natural
+    transition remains the honest fix for very long sequences.
+
+    Opt-in per clip (the trim popup's brightness checkbox), export-only.
+    """
+    anchor = float(prev_f[-4:].mean())
+    a0 = min(12, max(0, next_f.shape[0] - 1))
+    a1 = min(36, next_f.shape[0])
+    if a1 <= a0 or anchor <= 1e-4:
+        return next_f
+    settled = float(next_f[a0:a1].mean())
+    if settled <= 1e-4:
+        return next_f
+    g = max(lo, min(hi, anchor / settled))
+    if abs(g - 1.0) > 1e-3:
+        next_f = (next_f * g).clamp_(0.0, 1.0)
+        logging.info("MiniMaxH3Guide: clip level-matched — gain %.3f "
+                     "(settled %.1f -> anchor %.1f, /255)",
+                     g, settled * 255.0, anchor * 255.0)
+    return next_f
+
+
 def _luma_match(prev_f, next_f, frames=12, lo=0.82, hi=1.22):
     """Flatten the brightness zigzag at a motion-continuation join.
 
@@ -209,6 +243,10 @@ def register():
             prev_x = pieces[i - 1]["xfade"]
             xn = int(round(prev_x * fps))
             xn = min(xn, out_f.shape[0] - 1, f.shape[0] - 1)
+            if p.get("lumafix"):
+                # whole-clip exposure anchor first (both joint types), then the
+                # zigzag bridge below fine-corrects the head on hard cuts
+                f = _level_match(out_f, f)
             if xn > 0:
                 tv = torch.linspace(0.0, 1.0, xn).view(-1, 1, 1, 1)
                 blend = out_f[-xn:] * (1.0 - tv) + f[:xn] * tv
