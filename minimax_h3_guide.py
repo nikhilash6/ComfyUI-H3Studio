@@ -690,7 +690,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 io.Float.Input("v2v_end_seconds", default=0.0, min=0.0, max=10000.0, step=0.1,
                     tooltip="Section end in seconds; 0 = to the end of the source."),
                 io.Float.Input("v2v_denoise", default=0.55, min=0.0, max=1.0, step=0.05,
-                    tooltip="The v2v restyle amount, as a VALUE THIS NODE EMITS (third output): wire it to H3 Basic Scheduler's denoise input -> SamplerCustom/sigmas, and the editor's v2v bar controls the whole restyle. Has no effect on this node's own outputs otherwise; with a plain KSampler just set its denoise to match. ~0.3 barely touches the footage, 0.4-0.7 restyles keeping motion, 1.0 ignores it."),
+                    tooltip="The v2v restyle amount, as a VALUE THIS NODE EMITS (third output): wire it to H3 Basic Scheduler's denoise input -> SamplerCustom/sigmas, and the editor's v2v bar controls the whole restyle. Has no effect on this node's own outputs otherwise; with a plain KSampler just set its denoise to match. ~0.3 barely touches the footage, 0.4-0.7 restyles keeping motion, 1.0 ignores it.\n\nWith NO v2v source connected the output is forced to 1.0, since the latent is then an empty one that must denoise in full -- so the same wired graph does normal generation and restyles without rewiring."),
                 io.String.Input("v2v_crop", default="",
                     tooltip="Optional framing for the v2v source: 'center_x, center_y, zoom' (the editor's v2v ⛶ writes this). The window is locked to the width x height widgets' aspect and the footage is resized to exactly that canvas -- so WITH a framing, width/height matter again (reframe landscape footage into a vertical clip, etc.). Without one, the canvas follows the footage and width/height are ignored."),
                 io.String.Input("motion_context_file", default="",
@@ -724,7 +724,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             ],
             outputs=[io.Conditioning.Output(display_name="positive"), io.Latent.Output(),
                      io.Float.Output(display_name="v2v_denoise",
-                                     tooltip="The v2v_denoise widget's value -- wire to H3 Basic Scheduler's denoise socket so the editor drives the restyle amount.")],
+                                     tooltip="The restyle amount -- wire to H3 Basic Scheduler's denoise socket so the editor drives it. Forced to 1.0 when no v2v source is set (an empty latent must denoise in full), so one graph handles both generation and restyling.")],
         )
 
     @classmethod
@@ -1353,8 +1353,18 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         # start -> clean; declaring less makes the model commit fewer steps over
         # already-scrambled content -> the furthest from the source, grain the
         # price. Only meaningful when a v2v source was actually noised.
+        # No v2v source = the latent output is an EMPTY latent, which must be
+        # denoised in full. Emitting the widget's restyle value there would make
+        # a plain t2v/i2v render stop short of finishing (the wired scheduler
+        # would start mid-schedule over pure noise).
         out_denoise = float(v2v_denoise)
-        if v2v_frames is not None and float(v2v_noise) > 0.0:
+        if v2v_frames is None:
+            if abs(out_denoise - 1.0) > 1e-6:
+                logging.info("MiniMaxH3Guide: no v2v source -- emitting denoise 1.0 "
+                             "(the v2v_denoise widget's %.2f applies only to a "
+                             "restyle).", out_denoise)
+            out_denoise = 1.0
+        elif float(v2v_noise) > 0.0:
             b = max(0.0, min(1.0, float(v2v_noise)))
             eff = 1.0 - (1.0 - out_denoise) * (1.0 - b)
             declare = max(0.0, min(1.0, float(v2v_noise_declare)))
