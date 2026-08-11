@@ -2890,6 +2890,18 @@ function attachTimeline(node) {
             saveRes();
             refresh(true);
         });
+        const flipBtn = el("button", { ...btnStyle, padding: "1px 7px" }, "⇅");
+        flipBtn.title = "flip the aspect: swap width and height (landscape ⇄ portrait). Keeps the aspect lock in step.";
+        flipBtn.addEventListener("click", () => {
+            const [w, h] = outWH();
+            if (w === h) { toast("already square — nothing to flip"); return; }
+            setWidget("width", h);
+            setWidget("height", w);
+            if (dimLock) { lockRatio = h / w; saveLock(); }   // the lock follows the flip
+            saveRes();
+            refresh(true);
+            toast(`flipped to ${h}×${w}`);
+        });
         const syncAspectSel = () => {
             const [w, h] = outWH();
             const hit = ASPECTS.find(([, r]) => Math.abs((w / h) / r - 1) < 0.02);
@@ -2899,7 +2911,7 @@ function attachTimeline(node) {
             color: COL.text, fontSize: "12px", fontFamily: "monospace", flex: "1",
             display: "flex", alignItems: "center", gap: "5px",
         });
-        stats.append(wField, el("span", null, "×"), hField, lockBtn, aspectSel,
+        stats.append(wField, el("span", null, "×"), hField, flipBtn, lockBtn, aspectSel,
             el("span", null, "px ·"), lenField, snapNote);
 
         const freeVram = () => api.fetchApi("/free", {
