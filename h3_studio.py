@@ -219,7 +219,7 @@ def parse_ref_spec(spec, count, field="ref_spec"):
         return [AUTO_REF_STRENGTH] * count
     if len(lines) != count:
         raise ValueError(
-            "MiniMax H3 Guide: %s has %d line(s) but %d reference(s) are "
+            "H3 Studio: %s has %d line(s) but %d reference(s) are "
             "connected. One strength per reference, or leave it empty for %.1f."
             % (field, len(lines), count, AUTO_REF_STRENGTH))
     out = []
@@ -227,10 +227,10 @@ def parse_ref_spec(spec, count, field="ref_spec"):
         try:
             s = float(line.split(",")[0].strip())
         except ValueError:
-            raise ValueError("MiniMax H3 Guide: %s line %d (%r) must be a number."
+            raise ValueError("H3 Studio: %s line %d (%r) must be a number."
                              % (field, i + 1, line))
         if not 0.0 <= s <= 2.0:
-            raise ValueError("MiniMax H3 Guide: %s strength on line %d must be 0.0-2.0, "
+            raise ValueError("H3 Studio: %s strength on line %d must be 0.0-2.0, "
                              "got %s" % (field, i + 1, s))
         out.append(s)
     return out
@@ -273,7 +273,7 @@ def parse_crop_spec(text, count, field="crops"):
     """
     all_lines = file_lines(text)
     if len(all_lines) > count:
-        logging.warning("MiniMaxH3Guide: %s has %d framing line(s) for %d item(s) -- extra "
+        logging.warning("H3Studio: %s has %d framing line(s) for %d item(s) -- extra "
                         "lines ignored; check for a stale framing after removing something.",
                         field, len(all_lines), count)
     out = []
@@ -283,12 +283,12 @@ def parse_crop_spec(text, count, field="crops"):
             continue
         p = [x.strip() for x in line.split(",")]
         if len(p) != 3:
-            raise ValueError("MiniMax H3 Guide: %s line %d (%r) must be "
+            raise ValueError("H3 Studio: %s line %d (%r) must be "
                              "'center_x, center_y, zoom' or '-'." % (field, i + 1, line))
         try:
             cx, cy, z = float(p[0]), float(p[1]), float(p[2])
         except ValueError:
-            raise ValueError("MiniMax H3 Guide: %s line %d (%r) -- values must be numbers."
+            raise ValueError("H3 Studio: %s line %d (%r) -- values must be numbers."
                              % (field, i + 1, line))
         out.append((min(max(cx, 0.0), 1.0), min(max(cy, 0.0), 1.0), max(1.0, z)))
     while len(out) < count:
@@ -321,7 +321,7 @@ def load_input_audio(name, field):
     recorder uploads 16-bit WAV, which needs no special handling anywhere.
     """
     if not folder_paths.exists_annotated_filepath(name):
-        raise ValueError("MiniMax H3 Guide: %s names %r, which is not in the input folder."
+        raise ValueError("H3 Studio: %s names %r, which is not in the input folder."
                          % (field, name))
     path = folder_paths.get_annotated_filepath(name)
     try:
@@ -340,7 +340,7 @@ def load_input_image(name, field):
     connected socket always wins over its file field.
     """
     if not folder_paths.exists_annotated_filepath(name):
-        raise ValueError("MiniMax H3 Guide: %s names %r, which is not in the input folder."
+        raise ValueError("H3 Studio: %s names %r, which is not in the input folder."
                          % (field, name))
     img = node_helpers.pillow(Image.open, folder_paths.get_annotated_filepath(name))
     img = node_helpers.pillow(ImageOps.exif_transpose, img).convert("RGB")
@@ -394,21 +394,21 @@ def load_input_video(name, field, max_seconds=REF_VIDEO_MAX_SECONDS):
     15 s. (Decode is whole-file either way; the cap only trims what we keep.)
     """
     if not folder_paths.exists_annotated_filepath(name):
-        raise ValueError("MiniMax H3 Guide: %s names %r, which is not in the input/output "
+        raise ValueError("H3 Studio: %s names %r, which is not in the input/output "
                          "folder." % (field, name))
     comp = InputImpl.VideoFromFile(folder_paths.get_annotated_filepath(name)).get_components()
     frames = comp.images
     if frames is None or frames.shape[0] == 0:
-        raise ValueError("MiniMax H3 Guide: %r has no video frames." % name)
+        raise ValueError("H3 Studio: %r has no video frames." % name)
     fps = float(comp.frame_rate) if comp.frame_rate else float(FPS_HINT)
     duration = frames.shape[0] / max(fps, 1e-6)
     n_out = int(duration * FPS_HINT)
     if max_seconds is not None and n_out > max_seconds * FPS_HINT:
         n_out = max_seconds * FPS_HINT
-        logging.info("MiniMaxH3Guide: %s %r is %.1fs -- keeping the first %ds "
+        logging.info("H3Studio: %s %r is %.1fs -- keeping the first %ds "
                      "(trained reference range).", field, name, duration, max_seconds)
     if n_out < 5:
-        raise ValueError("MiniMax H3 Guide: %r is under ~0.2s — reference videos need at "
+        raise ValueError("H3 Studio: %r is under ~0.2s — reference videos need at "
                          "least 5 frames at 24 fps." % name)
     idx = [min(frames.shape[0] - 1, int(round(i * fps / FPS_HINT))) for i in range(n_out)]
     frames = frames[idx]
@@ -445,7 +445,7 @@ def encode_ref_video(vae, audio_vae, frames, soundtrack, frame_count, megapixels
         fr = fr[:frame_count]
     n = fr.shape[0]
     if n < 5:
-        raise ValueError("MiniMax H3 Guide: %s needs at least 5 frames "
+        raise ValueError("H3 Studio: %s needs at least 5 frames "
                          "(~0.2s at 24 fps)" % (label or "a reference video"))
     while n % 17 != 5:
         n -= 1
@@ -493,13 +493,13 @@ def parse_middle_spec(spec, count, frame_count):
         # logged rather than left implicit, so it is obvious what was chosen.
         auto = ["%.4f, %s" % ((i + 1) / (count + 1.0), AUTO_MIDDLE_STRENGTH)
                 for i in range(count)]
-        logging.info("MiniMaxH3Guide: middle_frame_spec empty -- auto-placing %d waypoint(s) "
+        logging.info("H3Studio: middle_frame_spec empty -- auto-placing %d waypoint(s) "
                      "at %s (strength %s). Fill the spec to override.",
                      count, ", ".join(a.split(",")[0] for a in auto), AUTO_MIDDLE_STRENGTH)
         lines = auto
     if len(lines) != count:
         raise ValueError(
-            "MiniMax H3 Guide: middle_frame_spec has %d line(s) but %d middle frame(s) are "
+            "H3 Studio: middle_frame_spec has %d line(s) but %d middle frame(s) are "
             "connected. They pair up in order, so the counts must match -- or clear the "
             "spec entirely to have the waypoints spaced automatically."
             % (len(lines), count))
@@ -510,20 +510,20 @@ def parse_middle_spec(spec, count, frame_count):
         parts = [p.strip() for p in line.split(",", 2)]
         if len(parts) < 2:
             raise ValueError(
-                "MiniMax H3 Guide: middle_frame_spec line %d (%r) needs at least "
+                "H3 Studio: middle_frame_spec line %d (%r) needs at least "
                 "'position, strength'." % (i + 1, line))
         try:
             pos, strength = float(parts[0]), float(parts[1])
         except ValueError:
             raise ValueError(
-                "MiniMax H3 Guide: middle_frame_spec line %d (%r) -- position and strength "
+                "H3 Studio: middle_frame_spec line %d (%r) -- position and strength "
                 "must be numbers." % (i + 1, line))
         if not (math.isfinite(pos) and math.isfinite(strength)):
             raise ValueError(
-                "MiniMax H3 Guide: middle_frame_spec line %d (%r) -- position and strength "
+                "H3 Studio: middle_frame_spec line %d (%r) -- position and strength "
                 "must be finite numbers." % (i + 1, line))
         if not 0.0 <= strength <= 2.0:
-            raise ValueError("MiniMax H3 Guide: middle_frame_spec strength on line %d must "
+            raise ValueError("H3 Studio: middle_frame_spec strength on line %d must "
                              "be 0.0-2.0, got %s" % (i + 1, strength))
         # half-UP rounding: banker's collapsed half-frame positions a full frame
         # apart into spurious duplicates (edge-hunt finding). JS mirrors this.
@@ -535,7 +535,7 @@ def parse_middle_spec(spec, count, frame_count):
 
     if len(set(e["index"] for e in out)) != len(out):
         if not auto:
-            raise ValueError("MiniMax H3 Guide: two middle frames resolved to the same frame "
+            raise ValueError("H3 Studio: two middle frames resolved to the same frame "
                              "index. Spread the positions further apart, or lengthen the clip.")
         # auto-placement must never fail on its own rounding: nudge collisions apart
         used = set()
@@ -544,7 +544,7 @@ def parse_middle_spec(spec, count, frame_count):
             while idx in used:
                 idx += 1
             if idx > interior_hi:
-                raise ValueError("MiniMax H3 Guide: clip too short for %d middle frames "
+                raise ValueError("H3 Studio: clip too short for %d middle frames "
                                  "(only %d interior frame(s)). Lengthen the clip or "
                                  "disconnect some." % (len(out), interior_hi - interior_lo + 1))
             used.add(idx)
@@ -565,16 +565,16 @@ def parse_timed_text(spec, frame_count):
             continue
         parts = line.split(",", 1)
         if len(parts) < 2 or not parts[1].strip():
-            raise ValueError("MiniMax H3 Guide: timed_text line %d (%r) needs "
+            raise ValueError("H3 Studio: timed_text line %d (%r) needs "
                              "'position, some text'." % (i + 1, line))
         try:
             pos = float(parts[0].strip())
         except ValueError:
-            raise ValueError("MiniMax H3 Guide: timed_text line %d (%r) -- position must be "
+            raise ValueError("H3 Studio: timed_text line %d (%r) -- position must be "
                              "a number (fraction of the clip, or a frame number above 1.0)."
                              % (i + 1, line))
         if not math.isfinite(pos):
-            raise ValueError("MiniMax H3 Guide: timed_text line %d (%r) -- position must be "
+            raise ValueError("H3 Studio: timed_text line %d (%r) -- position must be "
                              "a finite number." % (i + 1, line))
         x = pos * (frame_count - 1) if pos <= 1.0 else pos
         index = int(math.floor(x + 0.5))
@@ -651,14 +651,14 @@ def row_aug_ready():
     return h3_row_aug_patch.install()
 
 
-class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
+class H3StudioImageToVideo(io.ComfyNode):
     """t2va and fl2va with an independent strength dial on each keyframe."""
 
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="MiniMaxH3ImageToVideoGuide",
-            display_name="MiniMax H3 Image to Video (Guide)",
+            node_id="H3StudioImageToVideo",
+            display_name="H3 Studio (Image to Video)",
             category="model/conditioning/minimax",
             description="MiniMax H3 first/last frame conditioning with an adjustable strength per keyframe, so either frame can guide the motion instead of pinning it.",
             inputs=[
@@ -888,17 +888,17 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             if v2v_audio is not None:
                 v2v_snd = v2v_audio
         elif v2v_audio is not None:
-            raise ValueError("MiniMax H3 Guide: v2v_audio is connected but there is no v2v "
+            raise ValueError("H3 Studio: v2v_audio is connected but there is no v2v "
                              "source (connect v2v_images or set v2v_video_file).")
         if v2v_frames is not None:
             total = v2v_frames.shape[0]
             s = max(0, min(total, int(round(v2v_start_seconds * FPS_HINT))))
             e = total if v2v_end_seconds <= 0 else max(0, min(total, int(round(v2v_end_seconds * FPS_HINT))))
             if v2v_end_seconds > 0 and v2v_end_seconds * FPS_HINT > total:
-                logging.info("MiniMaxH3Guide: v2v section end %.1fs is past the %.1fs source "
+                logging.info("H3Studio: v2v section end %.1fs is past the %.1fs source "
                              "-- clamped to the end.", v2v_end_seconds, total / FPS_HINT)
             if e <= s:
-                raise ValueError("MiniMax H3 Guide: empty v2v section -- start %.2fs to end "
+                raise ValueError("H3 Studio: empty v2v section -- start %.2fs to end "
                                  "%s of a %.2fs source."
                                  % (v2v_start_seconds,
                                     "the end (0)" if v2v_end_seconds <= 0
@@ -926,7 +926,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 cw = max(32, int(round(width / 32)) * 32)
                 ch = max(32, int(round(height / 32)) * 32)
                 if (cw, ch) != (width, height):
-                    logging.info("MiniMaxH3Guide: v2v framing canvas snapped to the 32 grid: "
+                    logging.info("H3Studio: v2v framing canvas snapped to the 32 grid: "
                                  "%dx%d -> %dx%d.", width, height, cw, ch)
                 frames_sel = apply_crop(frames_sel, vc, cw, ch)
                 frames_sel = _resize(frames_sel, cw, ch, "disabled")
@@ -939,17 +939,17 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             vshape = latent["samples"].tensors[0].shape
             fw, fh = vshape[-1] * 16, vshape[-2] * 16
             if (fw, fh) != (width, height):
-                logging.info("MiniMaxH3Guide: v2v canvas follows the footage: %dx%d "
+                logging.info("H3Studio: v2v canvas follows the footage: %dx%d "
                              "(width/height widgets %dx%d ignored).", fw, fh, width, height)
             width, height = fw, fh
             trained_area = 768 * 1344
             if width * height > trained_area * 1.1:
-                logging.warning("MiniMaxH3Guide: v2v canvas %dx%d is %.1fx the trained "
+                logging.warning("H3Studio: v2v canvas %dx%d is %.1fx the trained "
                                 "~768x1344 area -- steps will be slow and quality may "
                                 "drift. Frame the footage (v2v ⛶) to a smaller canvas, "
                                 "or downscale the source first.",
                                 width, height, width * height / trained_area)
-            logging.info("MiniMaxH3Guide: v2v source active -- clip length follows the "
+            logging.info("H3Studio: v2v source active -- clip length follows the "
                          "footage (%d frames, %.1fs); the length widget is ignored. "
                          "Sample at denoise 0.3-0.7 to restyle.",
                          frame_count, frame_count / FPS_HINT)
@@ -965,7 +965,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 parts = [flow_blend(p, 1.0 - b, V2V_NOISE_SEED + i)
                          for i, p in enumerate(parts)]
                 latent = {"samples": comfy.nested_tensor.NestedTensor(tuple(parts))}
-                logging.info("MiniMaxH3Guide: v2v latent scrambled %.0f%% toward noise "
+                logging.info("H3Studio: v2v latent scrambled %.0f%% toward noise "
                              "(%.0f%% of the footage structure left).", b * 100,
                              (1.0 - b) * 100)
         else:
@@ -1016,13 +1016,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         stray = sorted(set(ref_mask_by_slot) - {s for s, _ in ref_slots if s is not None})
         if stray:
             raise ValueError(
-                "MiniMax H3 Guide: ref_mask_%s has no matching ref_image_%s. Masks pair "
+                "H3 Studio: ref_mask_%s has no matching ref_image_%s. Masks pair "
                 "with the same-numbered reference image."
                 % (stray[0], stray[0]))
         ref_strengths = parse_ref_spec(ref_spec, len(refs))
         spec = parse_middle_spec(middle_frame_spec, len(mids), frame_count)
         if spec and not middle_frame_patch.install():
-            raise RuntimeError("MiniMax H3 Guide: middle keyframes need the PackedLayout "
+            raise RuntimeError("H3 Studio: middle keyframes need the PackedLayout "
                                "extension, which could not be installed. See the log.")
 
         # -- motion context: pin the previous clip's tail at this clip's head --
@@ -1042,12 +1042,12 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         if mc_file:
             if not middle_frame_patch.install():
                 raise RuntimeError(
-                    "MiniMax H3 Guide: motion context needs the PackedLayout extension, "
+                    "H3 Studio: motion context needs the PackedLayout extension, "
                     "which could not be installed. See the log. Plain ⏭ continuation "
                     "(final frame -> first frame) still works.")
             if v2v_frames is not None:
                 logging.warning(
-                    "MiniMaxH3Guide: motion context AND a v2v source are both set -- the "
+                    "H3Studio: motion context AND a v2v source are both set -- the "
                     "pinned head frames will fight the footage being restyled over the "
                     "same opening. This combination is untested; expect odd joins.")
             mc_frames, mc_snd = load_input_video(mc_file, "motion_context_file",
@@ -1058,18 +1058,18 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 cut = max(1, min(total_mc,
                                  int(round(motion_context_end_seconds * FPS_HINT))))
                 if cut < total_mc:
-                    logging.info("MiniMaxH3Guide: motion context continues from %.2fs "
+                    logging.info("H3Studio: motion context continues from %.2fs "
                                  "(frame %d of %d) of %r.",
                                  motion_context_end_seconds, cut, total_mc, mc_file)
             n = max(1, min(int(motion_context_frames), cut))
             run = next(g for g in MC_VIDEO_RUN_GRID if g <= n)
             if run != n:
-                logging.info("MiniMaxH3Guide: motion context %d frames is off the video "
+                logging.info("H3Studio: motion context %d frames is off the video "
                              "VAE's run grid -- pinning the last %d instead (usable "
                              "runs: 1, 5, 22, 39).", n, run)
             if run >= frame_count:
                 raise ValueError(
-                    "MiniMax H3 Guide: motion context of %d frames into a %d-frame clip "
+                    "H3 Studio: motion context of %d frames into a %d-frame clip "
                     "-- the pinned run must be a small fraction of the timeline. "
                     "Lengthen the clip or lower motion_context_frames." % (run, frame_count))
             # Best case: this clip is the render we just made and its latent is
@@ -1083,18 +1083,18 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 if entry is not None:
                     got = mc_slice_from_latent(entry, run, cut)
                     if got is None:
-                        logging.info("MiniMaxH3Guide: cached latent can't serve a "
+                        logging.info("H3Studio: cached latent can't serve a "
                                      "%d-frame run ending at frame %d — re-encoding.",
                                      run, cut)
                     else:
                         mc_cached = (entry, got)
                 else:
-                    logging.info("MiniMaxH3Guide: motion context re-encoding (%s).", why)
+                    logging.info("H3Studio: motion context re-encoding (%s).", why)
             else:
                 # never silent: a disabled toggle used to look identical to a
                 # working cache in the log, which hid a whole VAE round trip
                 logging.warning(
-                    "MiniMaxH3Guide: motion_context_reuse_latent is OFF — this link "
+                    "H3Studio: motion_context_reuse_latent is OFF — this link "
                     "decodes the clip and re-encodes it through the VAE. That round "
                     "trip is what prints the 16px grid into a chain; switch it on "
                     "unless you have a reason not to.")
@@ -1121,13 +1121,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                         lim = float(MC_ANCHOR_CLAMP)
                         mc_shift = max(-lim, min(lim, err))
                         if abs(err) > lim:
-                            logging.info("MiniMaxH3Guide: brightness error %.4f "
+                            logging.info("H3Studio: brightness error %.4f "
                                          "exceeds the +-%.2f clamp — correcting "
                                          "what's safe; a real lighting change "
                                          "will simply re-anchor if you clear the "
                                          "reel.", err, lim)
                         if abs(mc_shift) > 1e-4:
-                            logging.info("MiniMaxH3Guide: brightness anchor — last "
+                            logging.info("H3Studio: brightness anchor — last "
                                          "render sat at %.4f vs anchor %.4f, "
                                          "nudging the pinned context %+.4f.",
                                          r, a, mc_shift)
@@ -1136,7 +1136,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                                      blocks[k], mc_shift).to(dev)}
                                 for k in range(len(blocks))]
                 mc_span = span
-                logging.info("MiniMaxH3Guide: motion context taken straight from "
+                logging.info("H3Studio: motion context taken straight from "
                              "the cached latent — no VAE round trip this link "
                              "(%d steps, %d frames).", len(blocks), span)
             else:
@@ -1148,7 +1148,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 steps = int(enc.shape[2])
                 if mc_pixel_frames(steps) != run:
                     raise RuntimeError(
-                        "MiniMax H3 Guide: %d context frames encoded to %d latent steps "
+                        "H3 Studio: %d context frames encoded to %d latent steps "
                         "covering %d -- the video VAE's downscale grid changed upstream. "
                         "Refusing to render a shifted join." % (run, steps, mc_pixel_frames(steps)))
                 offsets = mc_step_offsets(steps)
@@ -1181,16 +1181,16 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 mc_audio_block = {"kind": "audio", "ref_audio_t": int(z_a.shape[-1]),
                                   "audio_latent": z_a,
                                   MC_AUDIO_END_KEY: float(mc_span)}
-                logging.info("MiniMaxH3Guide: motion context audio sliced from the "
+                logging.info("H3Studio: motion context audio sliced from the "
                              "cached latent too — %d steps, no audio VAE round "
                              "trip.", int(z_a.shape[-1]))
             elif a_frames > 0:
                 if mc_snd is None or mc_snd.get("waveform") is None:
-                    logging.info("MiniMaxH3Guide: motion context source %r has no "
+                    logging.info("H3Studio: motion context source %r has no "
                                  "soundtrack -- audio context skipped.", mc_file)
                 elif audio_vae is None:
                     raise ValueError(
-                        "MiniMax H3 Guide: motion context audio needs audio_vae -- wire "
+                        "H3 Studio: motion context audio needs audio_vae -- wire "
                         "the MiniMax H3 audio VAE in, or set motion_context_audio_frames "
                         "to 0 to continue picture only.")
                 else:
@@ -1199,12 +1199,12 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     want = int(round(a_frames / FPS_HINT * sr))
                     wf = mc_snd["waveform"][..., max(0, a_end - want):a_end]
                     if wf.shape[-1] <= 0:
-                        logging.warning("MiniMaxH3Guide: motion context audio window is "
+                        logging.warning("H3Studio: motion context audio window is "
                                         "empty at the cut point -- audio context skipped.")
                     else:
                         if wf.shape[-1] < want:
                             logging.warning(
-                                "MiniMaxH3Guide: motion context audio is %.2fs, shorter "
+                                "H3Studio: motion context audio is %.2fs, shorter "
                                 "than the %.2fs window -- pinning what there is.",
                                 wf.shape[-1] / sr, want / sr)
                         z_a, rt_a = encode_ref_audio(
@@ -1232,7 +1232,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                         kf["noise_aug"] = a_lbl
                         kf["latent"] = flow_blend(kf["latent"], a_lbl,
                                                   MC_NOISE_SEED_BASE + i)
-                    logging.info("MiniMaxH3Guide: motion context pinned at strength "
+                    logging.info("H3Studio: motion context pinned at strength "
                                  "%.2f (rows labelled %.3f) — the model refreshes the "
                                  "pinned region instead of copying it, which stops "
                                  "artifacts compounding down a chain.", mcs, a_lbl)
@@ -1240,12 +1240,12 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     for i, kf in enumerate(mc_keyframes):
                         kf["latent"] = weaken_cond_latent(kf["latent"], mcs,
                                                           MC_NOISE_SEED_BASE + i)
-                    logging.warning("MiniMaxH3Guide: motion context strength %.2f "
+                    logging.warning("H3Studio: motion context strength %.2f "
                                     "without the per-row label patch — softened, but "
                                     "expect less clean results than at 1.0.", mcs)
 
             if first_frame is not None or first_frame_file.strip():
-                logging.info("MiniMaxH3Guide: motion context occupies frames 0-%d -- "
+                logging.info("H3Studio: motion context occupies frames 0-%d -- "
                              "first_frame is ignored (the context IS the opening).",
                              mc_span - 1)
                 first_frame = None
@@ -1265,12 +1265,12 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                         free += 1
                     if free > frame_count - 2:
                         raise ValueError(
-                            "MiniMax H3 Guide: the %d-frame motion-context head plus "
+                            "H3 Studio: the %d-frame motion-context head plus "
                             "the waypoints leaves no room in a %d-frame clip. Lengthen "
                             "the clip, drop a waypoint, or lower "
                             "motion_context_frames." % (mc_span, frame_count))
                     logging.warning(
-                        "MiniMaxH3Guide: middle frame at frame %d sits inside the "
+                        "H3Studio: middle frame at frame %d sits inside the "
                         "%d-frame motion-context head (frames 0-%d repeat the source "
                         "tail, so nothing can be steered there) -- moved to frame %d "
                         "(%.2fs). Place it later to choose the moment yourself.",
@@ -1278,7 +1278,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     e["index"] = free
                     taken.add(free)
                     free += 1
-            logging.info("MiniMaxH3Guide: motion context -- %d frames of %r pinned at "
+            logging.info("H3Studio: motion context -- %d frames of %r pinned at "
                          "the head as %d cond block(s) at indices %s, audio %s. The "
                          "first %.2fs of the render repeats the source tail; the editor "
                          "trims it on the reel.",
@@ -1345,7 +1345,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             else:
                 if float(mask.max()) <= 0.0:
                     logging.warning(
-                        "MiniMaxH3Guide: ref_mask_%d is entirely black, so reference "
+                        "H3Studio: ref_mask_%d is entirely black, so reference "
                         "image %d is fully replaced by noise. If you wired a Load Image "
                         "MASK output from a file with no alpha, that is the cause.",
                         slot, n + 1)
@@ -1360,7 +1360,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             ref_items.append({"type": "image", "data": resized})
             ref_blocks.append(block)
         if ref_blocks:
-            logging.info("MiniMaxH3Guide: %d reference image(s) presented as %s -- use those "
+            logging.info("H3Studio: %d reference image(s) presented as %s -- use those "
                          "numbers in the prompt.", len(ref_blocks),
                          ", ".join("<Picture %d>" % (len(images) + i + 1)
                                    for i in range(len(ref_blocks))))
@@ -1377,7 +1377,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                           - {s for s, _ in vid_slots})
         if stray_va:
             raise ValueError(
-                "MiniMax H3 Guide: ref_video_audio_%d has no same-numbered ref_video_%d "
+                "H3 Studio: ref_video_audio_%d has no same-numbered ref_video_%d "
                 "connected -- soundtracks pair by socket number (file-picked videos use "
                 "their own embedded audio)." % (stray_va[0], stray_va[0]))
         for slot, framesv in vid_slots:
@@ -1385,13 +1385,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         for fn in file_lines(ref_video_files):
             video_sources.append(load_input_video(fn, "ref_video_files"))
         if len(video_sources) > 3:
-            raise ValueError("MiniMax H3 Guide: %d reference videos supplied -- H3 supports "
+            raise ValueError("H3 Studio: %d reference videos supplied -- H3 supports "
                              "at most 3 (sockets + ref_video_files combined)."
                              % len(video_sources))
         video_strengths = parse_ref_spec(ref_video_spec, len(video_sources), "ref_video_spec")
         video_crops = parse_crop_spec(ref_video_crops, len(video_sources), "ref_video_crops")
         if any(snd is not None for _, snd in video_sources) and audio_vae is None:
-            raise ValueError("MiniMax H3 Guide: a reference video has a soundtrack but "
+            raise ValueError("H3 Studio: a reference video has a soundtrack but "
                              "audio_vae is empty. Wire the MiniMax H3 audio VAE in, or use "
                              "a video without audio.")
         n_soundtracks = 0
@@ -1418,7 +1418,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             ref_items.append(vitem)
             ref_blocks.append(block)
         if video_sources:
-            logging.info("MiniMaxH3Guide: %d reference video(s) presented as %s%s.",
+            logging.info("H3Studio: %d reference video(s) presented as %s%s.",
                          len(video_sources),
                          ", ".join("<Video %d>" % (i + 1) for i in range(len(video_sources))),
                          (" with soundtrack(s) %s" % ", ".join(
@@ -1432,18 +1432,18 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         ref_audio_list += [load_input_audio(fn, "ref_audio_files")
                            for fn in file_lines(ref_audio_files)]
         if len(ref_audio_list) > 3:
-            raise ValueError("MiniMax H3 Guide: %d standalone reference audios supplied -- "
+            raise ValueError("H3 Studio: %d standalone reference audios supplied -- "
                              "H3 supports at most 3 (sockets + ref_audio_files combined)."
                              % len(ref_audio_list))
         if ref_audio_list and audio_vae is None:
             raise ValueError(
-                "MiniMax H3 Guide: %d reference audio input(s) connected but audio_vae is "
+                "H3 Studio: %d reference audio input(s) connected but audio_vae is "
                 "empty. Wire the MiniMax H3 audio VAE into audio_vae."
                 % len(ref_audio_list))
         for n, audio in enumerate(ref_audio_list):
             z, ref_audio_t = encode_ref_audio(audio_vae, audio)
             if ref_audio_t <= 0:
-                raise ValueError("MiniMax H3 Guide: reference audio %d encoded to zero "
+                raise ValueError("H3 Studio: reference audio %d encoded to zero "
                                  "length. Check the clip is not empty." % (n + 1))
             z = weaken_cond_latent(z, ref_audio_strength, REF_AUDIO_NOISE_SEED_BASE + n)
             ref_items.append({"type": "audio"})
@@ -1458,7 +1458,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             ref_blocks.append(mc_audio_block)
             if not extra_conds_patch.install():
                 raise RuntimeError(
-                    "MiniMax H3 Guide: motion-context audio needs the extra_conds "
+                    "H3 Studio: motion-context audio needs the extra_conds "
                     "patch, which could not be installed. See the log; set "
                     "motion_context_audio_frames to 0 to continue picture only.")
         if ref_audio_list or n_soundtracks or mc_audio_block is not None:
@@ -1466,13 +1466,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             # ignores audio conditioning and dies with a shape mismatch otherwise.
             if not turbo_compat.install() and turbo_compat.turbo_present():
                 logging.warning(
-                    "MiniMaxH3Guide: ComfyUI-MiniMax-H3-Turbo is loaded but could not be "
+                    "H3Studio: ComfyUI-MiniMax-H3-Turbo is loaded but could not be "
                     "patched for audio conditioning. If sampling fails with 'size of "
                     "tensor a (N) must match tensor b (N-1)', that is why -- remove the "
                     "reference audio or the turbo LoRA.")
         if ref_audio_list:
             # soundtracks were labelled first, so standalone numbering starts after them
-            logging.info("MiniMaxH3Guide: %d reference audio presented as %s (strength %.2f).",
+            logging.info("H3Studio: %d reference audio presented as %s (strength %.2f).",
                          len(ref_audio_list),
                          ", ".join("<Audio %d>" % (n_soundtracks + i + 1)
                                    for i in range(len(ref_audio_list))),
@@ -1494,15 +1494,15 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 text_ids = text_ids_fn(clip)
                 if text_ids is None:
                     raise ValueError(
-                        "MiniMax H3 Guide: timed_text_mode %r needs the MiniMax H3 text "
+                        "H3 Studio: timed_text_mode %r needs the MiniMax H3 text "
                         "encoder (its tokenizer exposes _text_ids). Use 'text only' with "
                         "this clip." % timed_text_mode)
                 spans = beat_spans(text_ids, prompt, fragments)
                 if spans is None:
-                    raise ValueError("MiniMax H3 Guide: could not locate the timed_text "
+                    raise ValueError("H3 Studio: could not locate the timed_text "
                                      "beats in the tokenised prompt. Use 'text only'.")
                 if not extra_conds_patch.install():
-                    raise RuntimeError("MiniMax H3 Guide: timed-text anchoring could not be "
+                    raise RuntimeError("H3 Studio: timed-text anchoring could not be "
                                        "installed. See the log; 'text only' still works.")
                 text_beats = [{"start_from_end": s, "stop_from_end": e,
                                "frame_index": b["index"]}
@@ -1532,7 +1532,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": ref_blocks})
             if keyframes and not extra_conds_patch.install():
                 raise RuntimeError(
-                    "MiniMax H3 Guide: combining reference images with keyframes needs the "
+                    "H3 Studio: combining reference images with keyframes needs the "
                     "extra_conds merge patch, which could not be installed. See the log. "
                     "Use references OR keyframes alone until resolved.")
         if text_beats:
@@ -1569,7 +1569,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
         out_denoise = float(v2v_denoise)
         if v2v_frames is None:
             if abs(out_denoise - 1.0) > 1e-6:
-                logging.info("MiniMaxH3Guide: no v2v source -- emitting denoise 1.0 "
+                logging.info("H3Studio: no v2v source -- emitting denoise 1.0 "
                              "(the v2v_denoise widget's %.2f applies only to a "
                              "restyle).", out_denoise)
             out_denoise = 1.0
@@ -1578,13 +1578,13 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             eff = 1.0 - (1.0 - out_denoise) * (1.0 - b)
             declare = max(0.0, min(1.0, float(v2v_noise_declare)))
             out_denoise = min(1.0, out_denoise + declare * (eff - out_denoise))
-            logging.info("MiniMaxH3Guide: v2v_denoise %.2f + noise %.2f declared "
+            logging.info("H3Studio: v2v_denoise %.2f + noise %.2f declared "
                          "%.0f%% -> emitting %.3f (the latent truly sits at %.3f).",
                          float(v2v_denoise), b, declare * 100, out_denoise, eff)
         return io.NodeOutput(cond, latent, out_denoise)
 
 
-class MiniMaxH3GuideExtension(ComfyExtension):
+class H3StudioExtension(ComfyExtension):
     async def get_node_list(self):
         from .load_image_zoom_pan import LoadImageZoomPan
         from .h3_v2v import H3VideoToLatent, H3FrameRange, H3Splice
@@ -1592,10 +1592,10 @@ class MiniMaxH3GuideExtension(ComfyExtension):
         from .h3_v2v import H3BasicScheduler
         from .h3_diff_v2v import H3SoftDenoiseZone
         from .h3_regional import H3RegionalPrompt
-        return [MiniMaxH3ImageToVideoGuide, LoadImageZoomPan,
+        return [H3StudioImageToVideo, LoadImageZoomPan,
                 H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend,
                 H3BasicScheduler, H3SoftDenoiseZone, H3RegionalPrompt]
 
 
-async def comfy_entrypoint() -> MiniMaxH3GuideExtension:
-    return MiniMaxH3GuideExtension()
+async def comfy_entrypoint() -> H3StudioExtension:
+    return H3StudioExtension()

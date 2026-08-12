@@ -94,7 +94,7 @@ function imageUrl(value) {
     // EXIF orientation, matching this node's python loader. Raw /view fallback
     // lives in loadImage. Python still reads the original file.
     return api.apiURL(
-        `/h3guide/preview?filename=${encodeURIComponent(name)}&type=${type}` +
+        `/h3studio/preview?filename=${encodeURIComponent(name)}&type=${type}` +
         `&subfolder=${encodeURIComponent(subfolder)}&t=${Date.now()}`
     );
 }
@@ -459,7 +459,7 @@ function attachFramingCanvas(node) {
 }
 
 app.registerExtension({
-    name: "ComfyUI.MiniMaxH3Guide.LoadImageZoomPan",
+    name: "ComfyUI.H3Studio.LoadImageZoomPan",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_NAME) return;
 

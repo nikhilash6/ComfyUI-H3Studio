@@ -2,7 +2,7 @@
 
 Core's /view?preview=webp re-encodes without ImageOps.exif_transpose, so an
 orientation-tagged phone JPEG comes back sideways relative to what python
-actually loads (minimax_h3_guide.load_input_image DOES transpose). Framing
+actually loads (h3_studio.load_input_image DOES transpose). Framing
 coordinates are normalized over the displayed pixels, so the display and the
 loader must agree on orientation -- this route is /view's preview branch plus
 the transpose. Same-size re-encode only; python always reads the original file.
@@ -42,8 +42,8 @@ def register():
     # bounded preview keeps crops exact while encoding ~10x faster
     PREVIEW_MAX_EDGE = 2048
 
-    @routes.get("/h3guide/browse")
-    async def h3guide_browse(request):
+    @routes.get("/h3studio/browse")
+    async def h3studio_browse(request):
         """Real directory listing for the picker: folders even when EMPTY (the
         file-derived approach showed nothing in a fresh tree) and folder
         navigation on the output tab (core's /internal listing is flat).
@@ -102,8 +102,8 @@ def register():
                         files.append((e.stat().st_mtime, rp))
         return dirs, files
 
-    @routes.post("/h3guide/reset_anchor")
-    async def h3guide_reset_anchor(request):
+    @routes.post("/h3studio/reset_anchor")
+    async def h3studio_reset_anchor(request):
         """Forget the chain's brightness anchor — the editor calls this when a
         reel is emptied or a chain starts fresh, so the next link re-anchors
         instead of dragging the old sequence's level into a new scene."""
@@ -111,8 +111,8 @@ def register():
         h3_latent_cache.anchor_set(None, "reel cleared")
         return web.json_response({"ok": True})
 
-    @routes.get("/h3guide/extract_frame")
-    async def h3guide_extract_frame(request):
+    @routes.get("/h3studio/extract_frame")
+    async def h3studio_extract_frame(request):
         """A clip's frame as a PNG, decoded by the SAME PyAV path the render
         uses. The editor used to do this in the browser (a <video> drawn to a
         canvas), which made Chrome apply its own YUV->RGB conversion: measured
@@ -131,7 +131,7 @@ def register():
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:
             import logging
-            logging.exception("MiniMaxH3Guide: frame extraction failed")
+            logging.exception("H3Studio: frame extraction failed")
             return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
                                      status=500)
         return web.json_response(payload, status=status)
@@ -139,7 +139,7 @@ def register():
     def _extract_frame(name, t):
         import logging
         import numpy as np
-        from .minimax_h3_guide import FPS_HINT, load_input_video
+        from .h3_studio import FPS_HINT, load_input_video
         # same decode + 24fps resample the conditioning path uses, so the saved
         # frame is bit-for-bit what the model would have been handed
         frames, _ = load_input_video(name, "frame extraction", max_seconds=None)
@@ -158,13 +158,13 @@ def register():
         out = "h3-final-%s.png" % base
         path = os.path.join(folder_paths.get_input_directory(), out)
         Image.fromarray(arr).save(path)
-        logging.info("MiniMaxH3Guide: extracted frame %d/%d of %r -> %s "
+        logging.info("H3Studio: extracted frame %d/%d of %r -> %s "
                      "(server-side decode, mean level %.2f)",
                      idx + 1, n, name, out, float(arr.mean()))
         return {"name": out, "frame": idx, "frames": n}, 200
 
-    @routes.get("/h3guide/preview")
-    async def h3guide_preview(request):
+    @routes.get("/h3studio/preview")
+    async def h3studio_preview(request):
         q = request.rel_url.query
         filename = q.get("filename", "")
         if not filename or filename[0] in "/\\" or ".." in filename:

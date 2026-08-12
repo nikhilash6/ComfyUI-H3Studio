@@ -1,4 +1,4 @@
-# ComfyUI MiniMax H3 Guide
+# ComfyUI H3 Studio
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/lorasandlenses)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
@@ -37,7 +37,7 @@ This node dials them independently.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <your-repo-url> ComfyUI-MiniMaxH3Guide
+git clone <your-repo-url> ComfyUI-H3Studio
 ```
 
 Restart ComfyUI (a **hard browser refresh** too, the first time — the pack ships a
@@ -50,7 +50,7 @@ onwards).
 ## Quick start
 
 1. Take any working stock **MiniMax H3 Image to Video** workflow
-2. Swap that node for **MiniMax H3 Image to Video (Guide)** — same inputs, same
+2. Swap that node for **H3 Studio (Image to Video)** — same inputs, same
    two outputs, wire it identically
 3. Leave both strengths at `1.0` and re-run: output is **bit-identical** to the
    stock node

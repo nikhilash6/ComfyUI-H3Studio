@@ -4,8 +4,8 @@ Flickr/Wikimedia for images and Freesound/Jamendo for audio).
 
 Routes (registered at import when a PromptServer exists):
 
-  /h3guide/websearch?q=...&kind=images|audio&page=N   proxy the search
-  /h3guide/webfetch?url=...&kind=...&...              download a pick into
+  /h3studio/websearch?q=...&kind=images|audio&page=N   proxy the search
+  /h3studio/webfetch?url=...&kind=...&...              download a pick into
                                                       input/web/ + log credit
 
 Search defaults to commercial-use licenses (CC0/PD/BY/BY-SA); every result
@@ -32,7 +32,7 @@ def _http_get(url, max_bytes):
     bodies are captured — which is how the Openverse anonymous page_size cap
     (>20 = 401) was diagnosed instead of showing as a bare status code.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-MiniMaxH3Guide"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-H3Studio"})
     opener = urllib.request.build_opener()
     try:
         with opener.open(req, timeout=60) as resp:
@@ -107,8 +107,8 @@ def register():
     except Exception:
         return  # server module importable but no live instance (tests)
 
-    @routes.get("/h3guide/websearch")
-    async def h3guide_websearch(request):
+    @routes.get("/h3studio/websearch")
+    async def h3studio_websearch(request):
         q = request.rel_url.query.get("q", "").strip()
         kind = request.rel_url.query.get("kind", "images")
         endpoint = OPENVERSE.get(kind)
@@ -151,8 +151,8 @@ def register():
         return web.json_response({"results": out,
                                   "count": data.get("result_count", len(out))})
 
-    @routes.get("/h3guide/webfetch")
-    async def h3guide_webfetch(request):
+    @routes.get("/h3studio/webfetch")
+    async def h3studio_webfetch(request):
         q = request.rel_url.query
         url = q.get("url", "")
         kind = q.get("kind", "images")

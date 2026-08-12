@@ -190,18 +190,18 @@ def install(at_import=False):
     except AttributeError:
         return False
     if argcount != 4:
-        logging.info("MiniMaxH3Guide: ComfyUI-MiniMax-H3-Turbo's _unique_t signature has "
+        logging.info("H3Studio: ComfyUI-MiniMax-H3-Turbo's _unique_t signature has "
                      "changed (%d args); assuming the audio fix landed upstream and "
                      "leaving it alone.", argcount)
         return False
     turbo._inject_adaln_egrid = _make_patched_inject(turbo)
     _PATCHED = turbo
-    logging.info("MiniMaxH3Guide: patched ComfyUI-MiniMax-H3-Turbo so audio conditioning "
+    logging.info("H3Studio: patched ComfyUI-MiniMax-H3-Turbo so audio conditioning "
                  "works with the turbo LoRA (its adaln row table ignored ref_audio).")
     if not at_import:
         # a LoRA node that already ran holds a closure built from the UNPATCHED
         # function; the patch only helps once that node re-executes (bug-hunt finding)
-        logging.warning("MiniMaxH3Guide: turbo pack was patched late. If a MiniMax H3 "
+        logging.warning("H3Studio: turbo pack was patched late. If a MiniMax H3 "
                         "Turbo LoRA was already applied this session, nudge that node "
                         "(change any widget) so it re-executes before sampling with audio.")
     return True

@@ -129,7 +129,7 @@ def install():
 def _install():
     model_cls = getattr(_mmm, "MiniMaxH3Model", None)
     if model_cls is None:
-        logging.warning("MiniMaxH3Guide: MiniMaxH3Model not found; per-row "
+        logging.warning("H3Studio: MiniMaxH3Model not found; per-row "
                         "strength labels unavailable.")
         return False
     if getattr(model_cls._forward, "_guide_row_aug", False):
@@ -139,11 +139,11 @@ def _install():
     try:
         cvr_src = textwrap.dedent(inspect.getsource(model_cls._cond_video_rows))
     except (OSError, TypeError) as exc:
-        logging.warning("MiniMaxH3Guide: cannot read core source (%s); per-row "
+        logging.warning("H3Studio: cannot read core source (%s); per-row "
                         "strength labels unavailable.", exc)
         return False
     if cvr_src != _CVR_EXPECTED:
-        logging.warning("MiniMaxH3Guide: core's _cond_video_rows changed upstream; "
+        logging.warning("H3Studio: core's _cond_video_rows changed upstream; "
                         "per-row strength labels unavailable (using blended fallback).")
         return False
 
@@ -151,19 +151,19 @@ def _install():
     try:
         fwd_src = textwrap.dedent(inspect.getsource(model_cls._forward))
     except (OSError, TypeError) as exc:
-        logging.warning("MiniMaxH3Guide: cannot read _forward source (%s).", exc)
+        logging.warning("H3Studio: cannot read _forward source (%s).", exc)
         return False
     if fwd_src.count(_FWD_OLD_1) != 1 or fwd_src.count(_FWD_OLD_2) != 1:
-        logging.warning("MiniMaxH3Guide: core's _forward timestep table changed "
+        logging.warning("H3Studio: core's _forward timestep table changed "
                         "upstream; per-row strength labels unavailable "
                         "(using blended fallback).")
         return False
     new_src = fwd_src.replace(_FWD_OLD_1, _FWD_NEW_1, 1).replace(_FWD_OLD_2, _FWD_NEW_2, 1)
     ns = {}
     try:
-        exec(compile(new_src, "<h3guide _forward row-aug>", "exec"), _mmm.__dict__, ns)
+        exec(compile(new_src, "<h3studio _forward row-aug>", "exec"), _mmm.__dict__, ns)
     except Exception as exc:
-        logging.warning("MiniMaxH3Guide: patched _forward failed to compile (%s: %s).",
+        logging.warning("H3Studio: patched _forward failed to compile (%s: %s).",
                         type(exc).__name__, exc)
         return False
     new_forward = ns["_forward"]
@@ -172,5 +172,5 @@ def _install():
 
     model_cls._forward = new_forward
     model_cls._cond_video_rows = _cond_video_rows_rowaug
-    logging.info("MiniMaxH3Guide: per-row condition noise-aug labels installed.")
+    logging.info("H3Studio: per-row condition noise-aug labels installed.")
     return True

@@ -51,12 +51,12 @@ def prepare_zone_mask(m3, t_lat, h, w, mask_feather):
     strictly outward. Shared by the Soft Denoise Zone and Regional Prompt."""
     m3 = m3.to(torch.float32).clamp(0.0, 1.0)
     if m3.shape[0] > 1 and t_lat > 1:
-        from .minimax_h3_guide import mc_pixel_frames, mc_step_offsets
+        from .h3_studio import mc_pixel_frames, mc_step_offsets
         pixel_frames = mc_pixel_frames(t_lat)
         offsets = mc_step_offsets(t_lat)
         b0 = m3.shape[0]
         if b0 != pixel_frames:
-            logging.info("MiniMaxH3Guide: %d mask frames onto a %d-frame clip — "
+            logging.info("H3Studio: %d mask frames onto a %d-frame clip — "
                          "resampling by index.", b0, pixel_frames)
         idx = [min(b0 - 1, round(p * (b0 - 1) / max(1, pixel_frames - 1)))
                for p in range(pixel_frames)]

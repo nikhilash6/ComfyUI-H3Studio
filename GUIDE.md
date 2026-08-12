@@ -1,6 +1,6 @@
-# H3 Guide — quick recipes
+# H3 Studio — quick recipes
 
-Add the **MiniMax H3 Image to Video (Guide)** node, click **⤢ open timeline editor**, work in fullscreen. Everything below assumes the editor unless it names a widget. Full detail: [README](README.md).
+Add the **H3 Studio (Image to Video)** node, click **⤢ open timeline editor**, work in fullscreen. Everything below assumes the editor unless it names a widget. Full detail: [README](README.md).
 
 ---
 

@@ -1,6 +1,6 @@
 """Reel export: stitch a chain of clips into one video, server-side.
 
-POST /h3guide/reel_export
+POST /h3studio/reel_export
   {"clips": [{"name": "a.mp4 [output]", "in": 0.0, "out": 0.0, "xfade": 0.5},
              ...],
    "fade_in": 0.5, "fade_out": 1.0, "fps": 24}
@@ -104,7 +104,7 @@ def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
     g = max(lo, min(hi, anchor / settled))
     if abs(g - 1.0) > 1e-3:
         next_f = (next_f * g).clamp_(0.0, 1.0)
-        logging.info("MiniMaxH3Guide: clip level-matched — gain %.3f "
+        logging.info("H3Studio: clip level-matched — gain %.3f "
                      "(settled %.1f -> anchor %.1f, /255)",
                      g, settled * 255.0, anchor * 255.0)
     return next_f
@@ -133,7 +133,7 @@ def _luma_match(prev_f, next_f, frames=12, lo=0.82, hi=1.22):
         next_f[k] = (next_f[k] * gk).clamp(0.0, 1.0)
         gains.append(gk)
     if gains:
-        logging.info("MiniMaxH3Guide: reel join luma-matched over %d frame(s), "
+        logging.info("H3Studio: reel join luma-matched over %d frame(s), "
                      "gain %.3f..%.3f", len(gains), min(gains), max(gains))
     return next_f
 
@@ -162,8 +162,8 @@ def register():
     except Exception:
         return
 
-    @routes.post("/h3guide/reel_export")
-    async def h3guide_reel_export(request):
+    @routes.post("/h3studio/reel_export")
+    async def h3studio_reel_export(request):
         try:
             body = await request.json()
         except Exception:
@@ -185,13 +185,13 @@ def register():
             payload, status = await asyncio.to_thread(_do_export, clips, fps,
                                                       fade_in, fade_out, music, sfx)
         except Exception as exc:
-            logging.exception("MiniMaxH3Guide: reel export failed")
+            logging.exception("H3Studio: reel export failed")
             return web.json_response({"error": "%s: %s" % (type(exc).__name__, exc)},
                                      status=500)
         return web.json_response(payload, status=status)
 
     def _do_export(clips, fps, fade_in, fade_out, music=None, sfx=None):
-        from .minimax_h3_guide import _resize, load_input_video, load_input_audio
+        from .h3_studio import _resize, load_input_video, load_input_audio
 
         pieces = []          # [{frames, audio, xfade_next_frames}]
         base_w = base_h = None
@@ -294,11 +294,11 @@ def register():
                     if s > 1:
                         bed_wf[..., -s:] *= torch.linspace(1.0, 0.0, s)
                 out_a = out_a + bed_wf * lvl
-                logging.info("MiniMaxH3Guide: reel music bed mixed — %r at %.0f%% "
+                logging.info("H3Studio: reel music bed mixed — %r at %.0f%% "
                              "from %.1fs (music fades %.1fs/%.1fs)",
                              music["name"], lvl * 100, start, m_fi, m_fo)
             except Exception:
-                logging.exception("MiniMaxH3Guide: music bed failed — exporting without it")
+                logging.exception("H3Studio: music bed failed — exporting without it")
 
         # audio-lane samples: each placed at its reel-time `at`, its own in→out
         # slice of the source file, own level and own head/tail fades, overlaid
@@ -306,7 +306,7 @@ def register():
         # lane arrives here as one entry per clip)
         _SFX_MAX = 96
         if len(sfx or []) > _SFX_MAX:
-            logging.warning("MiniMaxH3Guide: %d audio samples sent, mixing the "
+            logging.warning("H3Studio: %d audio samples sent, mixing the "
                             "first %d — the rest are NOT in this export",
                             len(sfx), _SFX_MAX)
         for k, s in enumerate((sfx or [])[:_SFX_MAX]):
@@ -319,7 +319,7 @@ def register():
                 at = max(0.0, float(s.get("at") or 0.0))
                 a0 = int(round(at * sr))
                 if a0 >= out_a.shape[-1]:
-                    logging.info("MiniMaxH3Guide: fx %r at %.1fs is past the reel end "
+                    logging.info("H3Studio: fx %r at %.1fs is past the reel end "
                                  "— skipped", sname, at)
                     continue
                 wf = _conform(load_input_audio(sname, "fx sample %d" % (k + 1)),
@@ -345,10 +345,10 @@ def register():
                     if n2 > 1:
                         wf[..., -n2:] *= torch.linspace(1.0, 0.0, n2)
                 out_a[..., a0:a0 + wf.shape[-1]] += wf * lvl
-                logging.info("MiniMaxH3Guide: fx %r mixed at %.1fs (%.1fs, %.0f%%)",
+                logging.info("H3Studio: fx %r mixed at %.1fs (%.1fs, %.0f%%)",
                              sname, at, wf.shape[-1] / sr, lvl * 100)
             except Exception:
-                logging.exception("MiniMaxH3Guide: fx sample %d failed — exporting "
+                logging.exception("H3Studio: fx sample %d failed — exporting "
                                   "without it", k + 1)
 
         # whole-reel fades: video to black, audio to silence
@@ -379,9 +379,9 @@ def register():
             video.save_to(path, format=Types.VideoContainer.MP4,
                           codec=Types.VideoCodec.H264)
         except Exception as exc:
-            logging.exception("MiniMaxH3Guide: reel encode failed")
+            logging.exception("H3Studio: reel encode failed")
             return {"error": "encode failed: %s" % exc}, 500
-        logging.info("MiniMaxH3Guide: reel exported — %d clip(s), %d frames -> %s",
+        logging.info("H3Studio: reel exported — %d clip(s), %d frames -> %s",
                      len(clips), out_f.shape[0], path)
         return {"name": SUBDIR + "/" + fname + " [output]",
                 "frames": int(out_f.shape[0])}, 200

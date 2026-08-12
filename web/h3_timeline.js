@@ -1,4 +1,4 @@
-// MiniMax H3 Image to Video (Guide) — timeline editor.
+﻿// H3 Studio (Image to Video) — timeline editor.
 //
 // Two surfaces:
 //   - NODE SUMMARY (read-only): micro-thumbs in time order, entity counts, error
@@ -22,21 +22,21 @@
 // rewritten on every interaction. API workflows, old saves and headless use are
 // untouched; the "raw text specs" toggle reveals the fields.
 //
-// The parsers below MUST mirror minimax_h3_guide.py (parse_middle_spec,
+// The parsers below MUST mirror h3_studio.py (parse_middle_spec,
 // parse_timed_text, parse_ref_spec), including comma handling, clamping and
 // python's banker's rounding — they are cross-verified headlessly.
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const NODE_NAME = "MiniMaxH3ImageToVideoGuide";
+const NODE_NAME = "H3StudioImageToVideo";
 
 // --- pure: spec parsing/formatting, mirrors the Python node -----------------
 // (self-contained: everything in this block is extracted and cross-verified
 // against the Python parsers headlessly — keep dependencies inside it)
 
 const FPS = 24;
-const AUTO_MIDDLE_STRENGTH = 1.0;   // MUST match minimax_h3_guide.py
+const AUTO_MIDDLE_STRENGTH = 1.0;   // MUST match h3_studio.py
 
 function snapFrameCount(length) {
     let n = Math.max(5, Math.round(length));
@@ -283,7 +283,7 @@ function previewFileUrl(name) {
     if (ann) { filename = ann[1].trim(); type = ann[2]; }
     const slash = filename.lastIndexOf("/");
     if (slash > -1) { subfolder = filename.slice(0, slash); filename = filename.slice(slash + 1); }
-    return api.apiURL(`/h3guide/preview?filename=${encodeURIComponent(filename)}&type=${type}` +
+    return api.apiURL(`/h3studio/preview?filename=${encodeURIComponent(filename)}&type=${type}` +
         `&subfolder=${encodeURIComponent(subfolder)}`);
 }
 
@@ -393,10 +393,14 @@ function adaptCanvasJS(w, h) {
     }
     return [Math.max(32, Math.round(nw / 32) * 32), Math.max(32, Math.round(nh / 32) * 32)];
 }
-const SETUP_FORMAT = "h3guide-setup";
+const SETUP_FORMAT = "h3studio-setup";
 const SETUP_VERSION = 1;
-const CAST_FORMAT = "h3guide-cast";
+const CAST_FORMAT = "h3studio-cast";
 const CAST_VERSION = 1;
+// setups and cast members are FILES on disk, saved before the rename — they
+// still load. Only what we write changes.
+const LEGACY_SETUP_FORMAT = "h3guide-setup";
+const LEGACY_CAST_FORMAT = "h3guide-cast";
 const CAST_PREFIX = "h3cast-";
 
 function buildCastJson(name, images, audio) {
@@ -408,7 +412,8 @@ function buildCastJson(name, images, audio) {
 function parseCastJson(text) {
     let j;
     try { j = JSON.parse(text); } catch (e) { return null; }
-    if (j?.format !== CAST_FORMAT || !Array.isArray(j.images)) return null;
+    if ((j?.format !== CAST_FORMAT && j?.format !== LEGACY_CAST_FORMAT)
+        || !Array.isArray(j.images)) return null;
     return {
         name: String(j.name || "unnamed"),
         images: j.images.filter((e) => e && typeof e.file === "string")
@@ -445,8 +450,8 @@ const HELP_COPY = [
 
 // ============================================================================
 
-const RES_KEY = "h3guide.lastRes";
-const LOCK_KEY = "h3guide.aspectLock";
+const RES_KEY = "h3studio.lastRes";
+const LOCK_KEY = "h3studio.aspectLock";
 
 // Settings a workflow saved before they existed should adopt rather than
 // inherit whatever a positional restore left behind. Keyed on absence from the
@@ -1403,7 +1408,7 @@ function attachTimeline(node) {
         // half-built modal that read as "stuck" — make it loud instead
         if (p && typeof p.catch === "function")
             p.catch((e) => {
-                console.error("[h3guide] modal build failed", e);
+                console.error("[h3studio] modal build failed", e);
                 toast("this panel hit an error: " + (e?.message || e), true);
             });
         document.body.appendChild(root);
@@ -1757,7 +1762,7 @@ function attachTimeline(node) {
         try {
             const ps = new URLSearchParams({ name });
             if (atSeconds && atSeconds > 0) ps.set("t", String(atSeconds));
-            const r = await api.fetchApi("/h3guide/extract_frame?" + ps.toString());
+            const r = await api.fetchApi("/h3studio/extract_frame?" + ps.toString());
             const j = await r.json();
             if (j.error) throw new Error(j.error);
             // deterministic name + overwrite: a cached thumb would show the OLD frame
@@ -1787,7 +1792,7 @@ function attachTimeline(node) {
         // an emptied reel means a new sequence: drop the brightness anchor so
         // the next chain levels itself rather than inheriting the old one
         if (had && !list.length) {
-            api.fetchApi("/h3guide/reset_anchor", { method: "POST" }).catch(() => {});
+            api.fetchApi("/h3studio/reset_anchor", { method: "POST" }).catch(() => {});
         }
     }
     function reelAdd(name) {
@@ -2051,7 +2056,8 @@ function attachTimeline(node) {
     function importSetup(json) {
         let setup;
         try { setup = JSON.parse(json); } catch (e) { toast("not valid JSON", true); return; }
-        if (setup?.format !== SETUP_FORMAT || !setup.fields) {
+        if ((setup?.format !== SETUP_FORMAT && setup?.format !== LEGACY_SETUP_FORMAT)
+            || !setup.fields) {
             toast("not an H3 setup file", true); return;
         }
         const missing = applySetupFields(setup);
@@ -2061,7 +2067,7 @@ function attachTimeline(node) {
     }
 
     async function webSearch(q, kind, page) {
-        const r = await api.fetchApi("/h3guide/websearch?q=" + encodeURIComponent(q)
+        const r = await api.fetchApi("/h3studio/websearch?q=" + encodeURIComponent(q)
             + "&kind=" + kind + "&page=" + (page || 1));
         const j = await r.json();
         if (j.error) throw new Error(j.error);
@@ -2070,7 +2076,7 @@ function attachTimeline(node) {
     async function webFetch(res, kind) {
         const ps = new URLSearchParams({ url: res.url, kind, title: res.title,
             creator: res.creator, license: res.license, source: res.source, id: res.id });
-        const r = await api.fetchApi("/h3guide/webfetch?" + ps.toString());
+        const r = await api.fetchApi("/h3studio/webfetch?" + ps.toString());
         const j = await r.json();
         if (j.error) throw new Error(j.error);
         toast(`pulled "${(res.title || j.name).slice(0, 40)}" — ${res.license}`
@@ -2189,7 +2195,7 @@ function attachTimeline(node) {
                 saveBox.appendChild(nameRow);
             }
             } catch (e) {
-                console.error("[h3guide] cast save pane failed", e);
+                console.error("[h3studio] cast save pane failed", e);
                 saveBox.appendChild(el("div", { color: COL.red, fontSize: "12px" },
                     "⚠ save pane failed: " + (e?.message || e)));
             }
@@ -2330,7 +2336,7 @@ function attachTimeline(node) {
             } catch (e) {
                 // an async death here used to leave "loading…" forever with no
                 // trace — now the modal says what broke
-                console.error("[h3guide] cast list failed", e);
+                console.error("[h3studio] cast list failed", e);
                 if (state.modal?.root === myRoot) {
                     listEl.textContent = "";
                     listEl.appendChild(el("div", { color: COL.red, fontSize: "12px" },
@@ -2562,15 +2568,15 @@ function attachTimeline(node) {
         });
     }
 
-    // ---- image picker: real folder explorer over /h3guide/browse ----------
-    const FAV_KEY = "h3guide.favPath";
+    // ---- image picker: real folder explorer over /h3studio/browse ----------
+    const FAV_KEY = "h3studio.favPath";
     function readFav() {
         try { return JSON.parse(localStorage.getItem(FAV_KEY)) || null; }
         catch (e) { return null; }
     }
     async function fetchBrowse(tab, folder, q) {
         const ps = new URLSearchParams({ type: tab, path: folder || "", q: q || "", kind: "images" });
-        const r = await api.fetchApi("/h3guide/browse?" + ps.toString());
+        const r = await api.fetchApi("/h3studio/browse?" + ps.toString());
         const j = await r.json();
         if (j.error) throw new Error(j.error);
         const ann = tab === "output" ? " [output]" : "";
@@ -3452,7 +3458,7 @@ function attachTimeline(node) {
                 toast("queued — progress and the result will show right here");
             } catch (e) {
                 run.armed = false;
-                console.error("[h3guide] queue failed", e);
+                console.error("[h3studio] queue failed", e);
                 toast("queue failed: " + (e?.message || e), true);
                 autoEnd("auto motion stopped — the queue call failed");
             }
@@ -3556,7 +3562,7 @@ function attachTimeline(node) {
                         // happens" — whatever breaks, say so
                         try { fn(chosen()); }
                         catch (e) {
-                            console.error("[h3guide] queue choice failed", e);
+                            console.error("[h3studio] queue choice failed", e);
                             toast("queue choice failed: " + (e?.message || e), true);
                         }
                     });
@@ -3596,7 +3602,7 @@ function attachTimeline(node) {
                                 if (meta && Math.abs(meta.w / meta.h - oW / oH) > 0.01)
                                     toast("heads-up: the clip's aspect differs from the output — ⛶ the first-frame card after this render", true);
                             } catch (e) {
-                                console.error("[h3guide] classic continuation failed", e);
+                                console.error("[h3studio] classic continuation failed", e);
                                 toast("continuation setup failed: " + (e?.message || e), true);
                                 return;
                             }
@@ -5440,7 +5446,7 @@ function attachTimeline(node) {
                     list.appendChild(el("div", { color: COL.text, fontSize: "12px", padding: "8px" }, "loading…"));
                     try {
                         const ps = new URLSearchParams({ type: tab, path: folder, kind: "video" });
-                        const r = await api.fetchApi("/h3guide/browse?" + ps.toString());
+                        const r = await api.fetchApi("/h3studio/browse?" + ps.toString());
                         const j = await r.json();
                         if (j.error) throw new Error(j.error);
                         if (gen !== loadGen) return;
@@ -5594,7 +5600,7 @@ function attachTimeline(node) {
             try {
                 const fx = fxGet();
                 const g2 = node.properties?.h3_guide || {};
-                const r = await api.fetchApi("/h3guide/reel_export", {
+                const r = await api.fetchApi("/h3studio/reel_export", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -8018,7 +8024,7 @@ function attachTimeline(node) {
 }
 
 app.registerExtension({
-    name: "ComfyUI.MiniMaxH3Guide.Timeline",
+    name: "ComfyUI.H3Studio.Timeline",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_NAME) return;
 
@@ -8067,7 +8073,7 @@ app.registerExtension({
                         const w = (this.widgets || []).find((x) => x.name === k);
                         if (w && w.value !== v) {
                             w.value = v;
-                            console.log("[h3guide] applied current default for " + k
+                            console.log("[h3studio] applied current default for " + k
                                 + " (this workflow predates it):", v);
                         }
                     }

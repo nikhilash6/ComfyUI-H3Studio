@@ -61,7 +61,7 @@ class GuidePackedLayout(_CorePackedLayout):
         cond_spans = [(a, b) for a, b, kind in self.segments if kind == "cond"]
         if len(cond_spans) != len(keyframes):
             raise RuntimeError(
-                "MiniMaxH3Guide: expected %d 'cond' segments in the packed layout but "
+                "H3Studio: expected %d 'cond' segments in the packed layout but "
                 "found %d -- ComfyUI's MiniMax H3 layout has changed and the middle-frame "
                 "patch is no longer safe. Use first/last keyframes only until this pack "
                 "is updated." % (len(keyframes), len(cond_spans)))
@@ -80,12 +80,12 @@ def install():
     if getattr(_mmm.PackedLayout, "_guide_patched", False):
         return True
     if _mmm.PackedLayout is not _CorePackedLayout:
-        logging.warning("MiniMaxH3Guide: another extension already replaced MiniMax H3's "
+        logging.warning("H3Studio: another extension already replaced MiniMax H3's "
                         "PackedLayout; skipping the middle-frame patch. Middle keyframes "
                         "will not work.")
         return False
     _mmm.PackedLayout = GuidePackedLayout
-    logging.info("MiniMaxH3Guide: middle-keyframe support enabled (PackedLayout extended).")
+    logging.info("H3Studio: middle-keyframe support enabled (PackedLayout extended).")
     return True
 
 

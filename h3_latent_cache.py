@@ -56,7 +56,7 @@ def arm():
     global _armed
     if not _armed:
         _armed = True
-        logging.info("MiniMaxH3Guide: latent cache armed — the next render's "
+        logging.info("H3Studio: latent cache armed — the next render's "
                      "latent will be kept for the following continuation.")
 
 
@@ -70,7 +70,7 @@ def anchor_get():
 def anchor_set(level, why=""):
     global _anchor
     _anchor = None if level is None else float(level)
-    logging.info("MiniMaxH3Guide: chain brightness anchor %s%s",
+    logging.info("H3Studio: chain brightness anchor %s%s",
                  "cleared" if level is None else "set to %.4f" % level,
                  (" (%s)" % why) if why else "")
 
@@ -85,7 +85,7 @@ def get():
 
 
 def _frames_for(latent_t):
-    from .minimax_h3_guide import mc_pixel_frames
+    from .h3_studio import mc_pixel_frames
     return mc_pixel_frames(int(latent_t))
 
 
@@ -117,7 +117,7 @@ def _luma_basis():
             raise ValueError("solve missed the target: %s" % got.tolist())
         _LUMA = (unit, M)
     except Exception as exc:
-        logging.warning("MiniMaxH3Guide: latent brightness map unavailable (%s); "
+        logging.warning("H3Studio: latent brightness map unavailable (%s); "
                         "brightness anchoring disabled.", exc)
         _LUMA = False
     return _LUMA
@@ -163,7 +163,7 @@ def install():
                 getattr(fmt, "latent_rgb_factors", None) is None:
             pass  # rgb factors are cosmetic; only the scale matters
         if float(getattr(fmt, "scale_factor", 1.0)) != 1.0:
-            logging.warning("MiniMaxH3Guide: H3 latent scale is no longer 1.0; "
+            logging.warning("H3Studio: H3 latent scale is no longer 1.0; "
                             "the latent cache is disabled (a sliced latent would "
                             "be mis-scaled).")
             return False
@@ -182,14 +182,14 @@ def install():
             try:
                 _capture(out)
             except Exception:
-                logging.debug("MiniMaxH3Guide: latent capture skipped",
+                logging.debug("H3Studio: latent capture skipped",
                               exc_info=True)
         return out
 
     wrapped._h3_latent_cache = True
     comfy.samplers.CFGGuider.sample = wrapped
     _installed = True
-    logging.info("MiniMaxH3Guide: latent cache installed (idle until a "
+    logging.info("H3Studio: latent cache installed (idle until a "
                  "motion context arms it).")
     return True
 
@@ -229,7 +229,7 @@ def _capture(out):
     # what this render actually came out at — the feedback term. Measured on
     # the tail (the part a continuation pins), free, no decode.
     _last["luma"] = latent_luma(_last["video"])
-    logging.info("MiniMaxH3Guide: cached this render's tail latent — last %d of "
+    logging.info("H3Studio: cached this render's tail latent — last %d of "
                  "%d steps (%d-frame clip, %dx%d), %.1f MB, level %s. The next "
                  "continuation can skip the VAE.",
                  kept, t_total, frames, int(video.shape[-1]) * 16,

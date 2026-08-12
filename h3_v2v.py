@@ -30,7 +30,7 @@ import comfy.nested_tensor
 import comfy.samplers
 from comfy_api.latest import io
 
-from .minimax_h3_guide import (FPS_HINT, _resize, encode_ref_audio, CANVAS_MULTIPLE)
+from .h3_studio import (FPS_HINT, _resize, encode_ref_audio, CANVAS_MULTIPLE)
 
 DENOISE_MODES = ["slice (core)", "rescale"]
 
@@ -55,14 +55,14 @@ def build_v2v_latent(vae, audio_vae, images, audio=None, fps=24.0, megapixels=0.
     while n % 17 != 5:
         n -= 1
     if n != images.shape[0]:
-        logging.info("MiniMaxH3Guide v2v: %s trimmed from %d to %d frames (17k+5 grid).",
+        logging.info("H3Studio v2v: %s trimmed from %d to %d frames (17k+5 grid).",
                      label, images.shape[0], n)
     if n > TRAINED_MAX_FRAMES:
-        logging.warning("MiniMaxH3Guide v2v: %s is %d frames (~%.1fs) -- past the "
+        logging.warning("H3Studio v2v: %s is %d frames (~%.1fs) -- past the "
                         "trained range of ~%d frames; results may degrade.",
                         label, n, n / FPS_HINT, TRAINED_MAX_FRAMES)
     if abs(fps - FPS_HINT) > 0.01:
-        logging.warning("MiniMaxH3Guide v2v: %s is %gfps but H3 renders at %dfps -- the "
+        logging.warning("H3Studio v2v: %s is %gfps but H3 renders at %dfps -- the "
                         "restyled clip will play retimed. Resample the footage to 24fps "
                         "first if timing matters.", label, fps, FPS_HINT)
     frames = images[:n]
@@ -81,7 +81,7 @@ def build_v2v_latent(vae, audio_vae, images, audio=None, fps=24.0, megapixels=0.
                   and audio.get("waveform") is not None
                   and audio["waveform"].shape[-1] > 0)
     if audio is not None and not have_audio:
-        logging.info("MiniMaxH3Guide v2v: %s audio is empty -- using a silent stream.",
+        logging.info("H3Studio v2v: %s audio is empty -- using a silent stream.",
                      label)
     if have_audio:
         if audio_vae is None:
@@ -95,7 +95,7 @@ def build_v2v_latent(vae, audio_vae, images, audio=None, fps=24.0, megapixels=0.
             audio_lat = torch.zeros(z.shape[0], z.shape[1], z.shape[2], audio_t,
                                     dtype=z.dtype, device=z.device)
             audio_lat[..., :t] = z
-            logging.info("MiniMaxH3Guide v2v: %s audio shorter than the clip "
+            logging.info("H3Studio v2v: %s audio shorter than the clip "
                          "(%d < %d latent frames) -- zero-padded.", label, t, audio_t)
     else:
         audio_lat = torch.zeros(1, 32, 2, audio_t, dtype=video.dtype, device=video.device)
@@ -184,7 +184,7 @@ class H3FrameRange(io.ComfyNode):
                 pad = torch.zeros(*sl.shape[:-1], want - sl.shape[-1],
                                   dtype=wf.dtype, device=wf.device)
                 sl = torch.cat([sl, pad], dim=-1)
-                logging.info("MiniMaxH3Guide range: audio ends %.2fs before the section "
+                logging.info("H3Studio range: audio ends %.2fs before the section "
                              "does -- zero-padded.", (want - sl.shape[-1]) / sr)
             out_audio = {"waveform": sl, "sample_rate": sr}
         else:
@@ -229,7 +229,7 @@ class H3Splice(io.ComfyNode):
         seg = section_images
         if s + seg.shape[0] > total:
             keep = max(0, total - s)
-            logging.warning("MiniMaxH3Guide splice: section overruns the original by %d "
+            logging.warning("H3Studio splice: section overruns the original by %d "
                             "frame(s) -- trimming the section to fit.",
                             seg.shape[0] - keep)
             seg = seg[:keep]
@@ -273,11 +273,11 @@ class H3Splice(io.ComfyNode):
                                            + orig[..., e0:e0 + xf] * ramp)
             audio = {"waveform": wf, "sample_rate": sr}
         elif section_audio is not None:
-            logging.warning("MiniMaxH3Guide splice: section audio given without "
+            logging.warning("H3Studio splice: section audio given without "
                             "original_audio -- passing the section audio through unspliced.")
             audio = section_audio
         elif original_audio is not None:
-            logging.warning("MiniMaxH3Guide splice: no section audio -- the original "
+            logging.warning("H3Studio splice: no section audio -- the original "
                             "soundtrack is kept over the restyled section.")
         else:
             audio = {"waveform": torch.zeros(1, 2, max(1, int(round(images.shape[0] / fps * 44100)))),

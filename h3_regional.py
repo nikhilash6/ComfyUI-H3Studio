@@ -46,7 +46,7 @@ import torch
 from comfy_api.latest import io
 
 from .h3_diff_v2v import prepare_zone_mask
-from .minimax_h3_guide import beat_spans, text_ids_fn
+from .h3_studio import beat_spans, text_ids_fn
 
 
 class H3RegionalPrompt(io.ComfyNode):
@@ -95,7 +95,7 @@ class H3RegionalPrompt(io.ComfyNode):
         if not prompt:
             raise ValueError(
                 "H3 Regional Prompt: the conditioning does not carry its prompt text. "
-                "Feed the MiniMax H3 Guide node's positive output (and re-run it once "
+                "Feed the H3 Studio node's positive output (and re-run it once "
                 "after updating this pack).")
         at = prompt.find(frag)
         if at < 0:

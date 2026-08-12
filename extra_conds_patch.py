@@ -117,19 +117,19 @@ def relocate_context_audio(layout, refs):
     if not marked:
         return 0
     if len(marked) > 1:
-        logging.warning("MiniMaxH3Guide: %d motion-context audio refs marked; expected "
+        logging.warning("H3Studio: %d motion-context audio refs marked; expected "
                         "one. Leaving all in stock ref placement.", len(marked))
         return 0
     mi = marked[0]
     blk = refs[mi]
     rt = int(blk.get("ref_audio_t", 0))
     if blk.get("kind") != "audio" or rt <= 0:
-        logging.warning("MiniMaxH3Guide: motion-context audio marker on a %r ref with "
+        logging.warning("H3Studio: motion-context audio marker on a %r ref with "
                         "%d steps; skipping relocation.", blk.get("kind"), rt)
         return 0
     origin = _video_time_origin(layout)
     if origin is None:
-        logging.warning("MiniMaxH3Guide: no video segment in the layout; motion-context "
+        logging.warning("H3Studio: no video segment in the layout; motion-context "
                         "audio left in ref placement.")
         return 0
     # each audio-bearing ref emits exactly one ref_audio segment, in refs order
@@ -137,7 +137,7 @@ def relocate_context_audio(layout, refs):
                   and r.get("kind") in ("audio", "video", "video_audio"))
     audio_segs = [(a, b) for a, b, kind in layout.segments if kind == "ref_audio"]
     if ordinal >= len(audio_segs):
-        logging.warning("MiniMaxH3Guide: motion-context audio segment not found "
+        logging.warning("H3Studio: motion-context audio segment not found "
                         "(ordinal %d of %d ref_audio segments); left in ref placement.",
                         ordinal, len(audio_segs))
         return 0
@@ -181,7 +181,7 @@ def apply_text_beats(layout, beats):
         start = text_len - int(beat["start_from_end"])
         stop = text_len - int(beat["stop_from_end"])
         if not (0 <= start < stop <= text_len):
-            logging.warning("MiniMaxH3Guide: timed-text span [%d,%d) outside the %d-token "
+            logging.warning("H3Studio: timed-text span [%d,%d) outside the %d-token "
                             "text run; skipping.", start, stop, text_len)
             continue
         base = origin + _mmm.FRAME_RESCALE * float(beat["frame_index"])
@@ -228,7 +228,7 @@ def _patched_extra_conds(self, **kwargs):
         if layout is None:
             # the DiT rebuilds a layout when extra_conds could not prebuild one, and
             # that path never sees the beats -- say so rather than silently no-op
-            logging.warning("MiniMaxH3Guide: no prebuilt layout, timed-text anchoring "
+            logging.warning("H3Studio: no prebuilt layout, timed-text anchoring "
                             "skipped for this run.")
         else:
             apply_text_beats(layout, beats)
@@ -244,10 +244,10 @@ def install():
     if getattr(current, "_guide_extra_conds", False):
         return True
     if current is not _orig_extra_conds:
-        logging.warning("MiniMaxH3Guide: MiniMaxH3.extra_conds was already replaced by "
+        logging.warning("H3Studio: MiniMaxH3.extra_conds was already replaced by "
                         "another extension; reference+keyframe merging and timed-text "
                         "anchoring are disabled.")
         return False
     _mb.MiniMaxH3.extra_conds = _patched_extra_conds
-    logging.info("MiniMaxH3Guide: extra_conds wrapped (ref/keyframe merge + timed text).")
+    logging.info("H3Studio: extra_conds wrapped (ref/keyframe merge + timed text).")
     return True
