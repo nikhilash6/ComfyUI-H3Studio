@@ -702,6 +702,14 @@ function attachTimeline(node) {
         return null;
     }
 
+    // the audible span of a lane sample: its in→out window, capped by the file
+    function sfxSegLenOf(s) {
+        const dur = state.sfxMeta.get(s.name) || 0;
+        const inP = Math.max(0, Number(s.in) || 0);
+        const outP = Number(s.out) > 0 ? Number(s.out) : (dur || 0);
+        return Math.max(0.1, (outP || 1) - inP);
+    }
+
     // one reel entry's audible length, after its trims. 0 = the duration has
     // not been read yet
     function clipKept(e) {
@@ -712,21 +720,66 @@ function attachTimeline(node) {
         return d ? Math.max(0, d - (e.in || 0)) : 0;
     }
 
+    // is this music meant to be HEARD, or is it only there for timing? A
+    // workflow saved before the `use` field existed carries just a level, and
+    // a level above zero meant soundtrack.
+    function musicIsTrack(g) {
+        return g.use ? (g.use === "track" || g.use === "both")
+            : Number(g.level) > 0;
+    }
+
+    // The clip windows on the reel timeline: {name, start, kept} per clip, in
+    // order. Clips whose duration has not been read yet are left out.
+    function clipWindows() {
+        const out = [];
+        let at = 0;
+        for (const e of reelGet()) {
+            const kept = clipKept(e);
+            if (!kept) continue;
+            out.push({ name: e.name, start: at, kept });
+            at += kept;
+        }
+        return out;
+    }
+
+    // Where a soundtrack dropped on the ♪ lane belongs: the first clip with no
+    // soundtrack on it yet, so a second file lands on the second clip rather
+    // than on top of the first. Falls back to the end of the reel.
+    function nextSoundtrackSlot() {
+        const wins = clipWindows();
+        if (!wins.length) return null;
+        const taken = sfxGet()[0] || [];
+        for (const w of wins) {
+            const covered = taken.some((s) => {
+                const a = Number(s.at) || 0;
+                return a < w.start + w.kept - 0.05 && a + sfxSegLenOf(s) > w.start + 0.05;
+            });
+            if (!covered) return w;
+        }
+        return wins[wins.length - 1];
+    }
+
     // Lay the song across the clips already in the reel: one chip per clip, at
     // that clip's position, cut to its length, playing straight on from where
     // the previous chip stopped. Returns how many it placed.
-    function backfillSoundtrack() {
+    function backfillSoundtrack(tries) {
         const g = node.properties?.h3_guide || {};
-        if (!g.name) return 0;
+        if (!g.name || !musicIsTrack(g)) return 0;
         const list = reelGet();
         if (!list.length) return 0;
         const tracks = sfxGet().map((x) => x.slice());
         const from = g.follow ? 0 : (Number(g.offset) || 0);
         const r1 = (v) => Math.round(v * 10) / 10;
-        let at = 0, made = 0;
+        let at = 0, made = 0, waiting = 0;
         for (const e of list) {
             const kept = clipKept(e);
-            if (!kept) continue;      // duration unknown — skip, don't guess
+            if (!kept) {
+                // duration still loading — a clip we cannot measure would put
+                // everything after it in the wrong place, so stop here and
+                // come back rather than laying the rest down wrongly
+                waiting++;
+                break;
+            }
             if (!tracks[0].some((s) => s.clip === e.name && s.name === g.name)) {
                 tracks[0].push({
                     name: g.name, at: r1(at), in: r1(from + at),
@@ -739,6 +792,8 @@ function attachTimeline(node) {
             at += kept;
         }
         if (made) sfxSet(tracks);
+        if (waiting && (tries || 0) < 12)
+            setTimeout(() => backfillSoundtrack((tries || 0) + 1), 400);
         return made;
     }
 
@@ -749,7 +804,7 @@ function attachTimeline(node) {
     // it is there for beats and timing, not for the mix.
     function soundtrackForClip(entry, atStart, songAt, tries) {
         const g = node.properties?.h3_guide || {};
-        if (!g.name || (g.use !== "track" && g.use !== "both")) return;
+        if (!g.name || !musicIsTrack(g)) return;
         const kept = clipKept(entry);
         if (!kept) {
             // duration still loading — the clip was rendered seconds ago
@@ -5641,13 +5696,25 @@ function attachTimeline(node) {
             addB2.addEventListener("click", () => openAudioPicker((n) => {
                 const tracks = sfxGet().map((x) => x.slice());
                 const lane = tracks[t];
-                let at = 0;
-                if (lane.length) {
-                    const last = lane[lane.length - 1];
-                    at = (Number(last.at) || 0) + (state.sfxMeta.get(last.name) || 1);
+                // ♪ lane: one soundtrack per clip, so a file dropped here is
+                // CUT TO THAT CLIP — a five minute song on a four second clip
+                // is four seconds. The fx lanes stay free-form.
+                const slot = t === 0 ? nextSoundtrackSlot() : null;
+                if (slot) {
+                    lane.push({ name: n, at: Math.round(slot.start * 10) / 10,
+                        in: 0, out: Math.round(slot.kept * 10) / 10,
+                        level: 1, fadeIn: 0, fadeOut: 0, clip: slot.name });
+                    toast(`♪ added on the clip at ${slot.start.toFixed(1)}s, cut to its `
+                        + `${slot.kept.toFixed(1)}s — drag its ends to change that`);
+                } else {
+                    let at = 0;
+                    if (lane.length) {
+                        const last = lane[lane.length - 1];
+                        at = (Number(last.at) || 0) + (state.sfxMeta.get(last.name) || 1);
+                    }
+                    lane.push({ name: n, at: Math.round(at * 10) / 10, level: 1,
+                        fadeIn: 0, fadeOut: 0 });
                 }
-                lane.push({ name: n, at: Math.round(at * 10) / 10, level: 1,
-                    fadeIn: 0, fadeOut: 0 });
                 sfxSel = { t, i: lane.length - 1 };
                 sfxSet(tracks);
             }));
@@ -5743,13 +5810,7 @@ function attachTimeline(node) {
             el("span", null, "vol"), sfxVol, el("span", null, "% ·"),
             el("span", null, "fade"), sfxFi, el("span", null, "/"), sfxFo,
             el("span", null, "s"), sfxPlayB, sfxDelB);
-        // the audible span of a sample: its in→out window, capped by file length
-        const sfxSegLen = (s) => {
-            const dur = state.sfxMeta.get(s.name) || 0;
-            const inP = Math.max(0, Number(s.in) || 0);
-            const outP = Number(s.out) > 0 ? Number(s.out) : (dur || 0);
-            return Math.max(0.1, (outP || 1) - inP);
-        };
+        const sfxSegLen = sfxSegLenOf;
 
         function renderSfx() {
             const tracks = sfxGet();
