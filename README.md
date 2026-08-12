@@ -33,17 +33,6 @@ run, and you have a clip.
 That workflow is the recommended starting point for everything below — the rest
 of this page is things you can add to it.
 
-The other files in `example_workflows/` are the same pipeline with one extra
-idea wired in, each carrying a note on the canvas explaining what to set:
-
-| Workflow | What it shows |
-|---|---|
-| `Section_restyle_v2v` | Restyle part of a clip and bake it back: Frame Range → Video To Latent → sample → Splice |
-| `Masked_restyle_soft_denoise_zone` | The same, but only one region changes — feathered, no matte line |
-| `Region_swap_zone_plus_regional_prompt` | Zone + Regional Prompt on one mask: *what* belongs there, not just where change is allowed |
-| `Temporal_lora_blend` | Different LoRA weights before and after a moment inside the clip |
-| `Zoom_and_pan_keyframes` | A camera move built from one still |
-
 ## Your first clip
 
 1. On the **H3 Studio (Image to Video)** node, click **⤢ open timeline editor**.
