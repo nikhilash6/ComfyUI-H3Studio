@@ -1249,13 +1249,35 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                              "first_frame is ignored (the context IS the opening).",
                              mc_span - 1)
                 first_frame = None
+            # Waypoints inside the pinned head cannot be honoured: those frames
+            # are the previous clip's own footage, already decided. This is easy
+            # to walk into, because the head only comes into existence when you
+            # pick motion continuation AT QUEUE TIME -- the waypoints were placed
+            # before it existed. Failing the render over it is the wrong answer,
+            # so they slide to the first frame that can actually hold them, in
+            # order, without landing on top of each other.
             bad_wp = [e for e in spec if e["index"] < mc_span]
             if bad_wp:
-                raise ValueError(
-                    "MiniMax H3 Guide: a middle frame at frame %d sits inside the "
-                    "%d-frame motion-context head (frames 0-%d are pinned). Move it "
-                    "past %.2fs or shorten the context."
-                    % (bad_wp[0]["index"], mc_span, mc_span - 1, mc_span / FPS_HINT))
+                taken = set(e["index"] for e in spec if e["index"] >= mc_span)
+                free = mc_span
+                for e in sorted(bad_wp, key=lambda x: x["index"]):
+                    while free in taken and free <= frame_count - 2:
+                        free += 1
+                    if free > frame_count - 2:
+                        raise ValueError(
+                            "MiniMax H3 Guide: the %d-frame motion-context head plus "
+                            "the waypoints leaves no room in a %d-frame clip. Lengthen "
+                            "the clip, drop a waypoint, or lower "
+                            "motion_context_frames." % (mc_span, frame_count))
+                    logging.warning(
+                        "MiniMaxH3Guide: middle frame at frame %d sits inside the "
+                        "%d-frame motion-context head (frames 0-%d repeat the source "
+                        "tail, so nothing can be steered there) -- moved to frame %d "
+                        "(%.2fs). Place it later to choose the moment yourself.",
+                        e["index"], mc_span, mc_span - 1, free, free / FPS_HINT)
+                    e["index"] = free
+                    taken.add(free)
+                    free += 1
             logging.info("MiniMaxH3Guide: motion context -- %d frames of %r pinned at "
                          "the head as %d cond block(s) at indices %s, audio %s. The "
                          "first %.2fs of the render repeats the source tail; the editor "

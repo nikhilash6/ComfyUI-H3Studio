@@ -1809,10 +1809,33 @@ function attachTimeline(node) {
     }
     // motion continuation is chosen AT QUEUE TIME (the ▶ queue chooser); these
     // just write/clear the widget snapshot the python side reads
+    // The pinned head only comes into existence when motion continuation is
+    // chosen — at QUEUE time, long after any waypoints were placed. A waypoint
+    // inside it can never be honoured: those frames repeat the source clip and
+    // are already decided. Lift them clear here, where the timeline can show
+    // it, instead of letting the render fail on the way in.
+    function mcFixWaypoints() {
+        const span = mcSpanFrames();
+        const F = fc();
+        if (!span || !(F > 2) || !state.mids?.length) return 0;
+        const minFrac = Math.min(0.98, (span + 1) / (F - 1));
+        let moved = 0;
+        for (const m of state.mids) {
+            if (m.frac < minFrac) { m.frac = minFrac; moved++; }
+        }
+        if (!moved) return 0;
+        pushMids();          // collisions are nudged apart by formatMiddleSpec
+        state.fs?.renderTrack?.();
+        toast(`${moved} waypoint${moved > 1 ? "s" : ""} moved past the ${span}-frame `
+            + `motion head (${(span / FPS).toFixed(2)}s) — that stretch repeats the clip `
+            + `you're continuing, so nothing can be steered there`);
+        return moved;
+    }
     function mcSetFrom(name, atSeconds) {
         setWidget("motion_context_file", name);
         setWidget("motion_context_end_seconds",
             atSeconds && atSeconds > 0 ? Math.round(atSeconds * 100) / 100 : 0);
+        mcFixWaypoints();
         // the context IS the opening — a stale first-frame thumbnail would lie
         if (!inputConnected(node, "first_frame")
             && String(widgetValue(node, "first_frame_file", "")).trim()) {
