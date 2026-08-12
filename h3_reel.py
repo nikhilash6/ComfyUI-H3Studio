@@ -300,10 +300,16 @@ def register():
             except Exception:
                 logging.exception("MiniMaxH3Guide: music bed failed — exporting without it")
 
-        # fx samples: each placed at its reel-time `at`, its own in→out slice
-        # of the source file, own level and own head/tail fades, overlaid
-        # additively (three UI tracks, but mixing is mixing)
-        for k, s in enumerate((sfx or [])[:24]):
+        # audio-lane samples: each placed at its reel-time `at`, its own in→out
+        # slice of the source file, own level and own head/tail fades, overlaid
+        # additively (four UI lanes, but mixing is mixing — the ♪ soundtrack
+        # lane arrives here as one entry per clip)
+        _SFX_MAX = 96
+        if len(sfx or []) > _SFX_MAX:
+            logging.warning("MiniMaxH3Guide: %d audio samples sent, mixing the "
+                            "first %d — the rest are NOT in this export",
+                            len(sfx), _SFX_MAX)
+        for k, s in enumerate((sfx or [])[:_SFX_MAX]):
             try:
                 sname = str(s.get("name") or "")
                 lvl = max(0.0, min(1.5, float(s.get("level")

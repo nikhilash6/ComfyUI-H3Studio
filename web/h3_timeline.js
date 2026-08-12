@@ -658,11 +658,18 @@ function attachTimeline(node) {
         return g.follow ? reelKeptTotal() : (Number(g.offset) || 0);
     }
 
-    // ---- fx tracks: samples placed on the REEL timeline, mixed at export ---
-    const SFX_TRACKS = 3;
+    // ---- audio lanes: samples placed on the REEL timeline, mixed at export.
+    // Four identical lanes; every one takes as many or as few files as you
+    // like. Lane 0 is the ♪ soundtrack — the only difference is that a clip's
+    // own music lands there automatically when the clip joins the reel.
+    const SFX_TRACKS = 4;
+    const TRACK_LABELS = ["♪", "fx1", "fx2", "fx3"];
     function sfxGet() {
         const t = node.properties?.h3_sfx;
         if (Array.isArray(t) && t.length === SFX_TRACKS) return t;
+        // workflows saved before the ♪ lane existed carry three fx lanes —
+        // keep them where they were and open the soundtrack lane above
+        if (Array.isArray(t) && t.length === SFX_TRACKS - 1) return [[], ...t];
         return Array.from({ length: SFX_TRACKS }, () => []);
     }
     function sfxSet(tracks) {
@@ -693,6 +700,74 @@ function attachTimeline(node) {
             state.sfxMeta.set(name, 0);
         }, { once: true });
         return null;
+    }
+
+    // one reel entry's audible length, after its trims. 0 = the duration has
+    // not been read yet
+    function clipKept(e) {
+        if (!e) return 0;
+        if (e.out > 0) return Math.max(0, e.out - (e.in || 0));
+        ensureVideoMeta(e.name);
+        const d = state.videoMeta.get(e.name)?.dur;
+        return d ? Math.max(0, d - (e.in || 0)) : 0;
+    }
+
+    // Lay the song across the clips already in the reel: one chip per clip, at
+    // that clip's position, cut to its length, playing straight on from where
+    // the previous chip stopped. Returns how many it placed.
+    function backfillSoundtrack() {
+        const g = node.properties?.h3_guide || {};
+        if (!g.name) return 0;
+        const list = reelGet();
+        if (!list.length) return 0;
+        const tracks = sfxGet().map((x) => x.slice());
+        const from = g.follow ? 0 : (Number(g.offset) || 0);
+        const r1 = (v) => Math.round(v * 10) / 10;
+        let at = 0, made = 0;
+        for (const e of list) {
+            const kept = clipKept(e);
+            if (!kept) continue;      // duration unknown — skip, don't guess
+            if (!tracks[0].some((s) => s.clip === e.name && s.name === g.name)) {
+                tracks[0].push({
+                    name: g.name, at: r1(at), in: r1(from + at),
+                    out: r1(from + at + kept),
+                    level: Number(g.level) > 0 ? Number(g.level) : 0.7,
+                    fadeIn: 0, fadeOut: 0, clip: e.name,
+                });
+                made++;
+            }
+            at += kept;
+        }
+        if (made) sfxSet(tracks);
+        return made;
+    }
+
+    // A clip carries the music it was rendered against. When it joins the reel
+    // that slice of the song lands on the ♪ lane at the clip's own position,
+    // CUT TO THE CLIP'S LENGTH — a five minute song behind a four second clip
+    // is four seconds of chip, not five minutes. Ref-only music stays silent:
+    // it is there for beats and timing, not for the mix.
+    function soundtrackForClip(entry, atStart, songAt, tries) {
+        const g = node.properties?.h3_guide || {};
+        if (!g.name || (g.use !== "track" && g.use !== "both")) return;
+        const kept = clipKept(entry);
+        if (!kept) {
+            // duration still loading — the clip was rendered seconds ago
+            if ((tries || 0) < 12)
+                setTimeout(() => soundtrackForClip(entry, atStart, songAt,
+                    (tries || 0) + 1), 400);
+            return;
+        }
+        const tracks = sfxGet().map((x) => x.slice());
+        if (tracks[0].some((s) => s.clip === entry.name && s.name === g.name)) return;
+        const inP = Math.max(0, Number(songAt) || 0);
+        const r1 = (v) => Math.round(v * 10) / 10;
+        tracks[0].push({
+            name: g.name, at: r1(Math.max(0, atStart)), in: r1(inP),
+            out: r1(inP + kept), level: Number(g.level) > 0 ? Number(g.level) : 1,
+            fadeIn: 0, fadeOut: 0, clip: entry.name,
+        });
+        sfxSet(tracks);
     }
 
     // Hits as positions ON THIS CLIP'S GRID. Everything downstream quantises a
@@ -2965,7 +3040,8 @@ function attachTimeline(node) {
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
         const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0,
-            setup: null, replaceTarget: null, autoAdvanced: false, autoResult: null };
+            guideAt: 0, setup: null, replaceTarget: null, autoAdvanced: false,
+            autoResult: null };
         // Auto Motion Mode: keep the chain going by itself — each finished
         // render joins the reel, becomes the next continuation source, and
         // queues again with the same prompt and settings. auto.left counts
@@ -3109,6 +3185,7 @@ function attachTimeline(node) {
         };
         const showResult = (name, isVideo) => {
             const renderedSpan = run.mcSpan;   // captured at queue time
+            const renderedAt = Number(run.guideAt) || 0;   // …and its song position
             stopVideosIn(resBody, true);
             stopDockMusic();
             resBody.textContent = "";
@@ -3178,6 +3255,9 @@ function attachTimeline(node) {
                 const reelB = el("button", { ...btnStyle, fontSize: "11px" }, "🎞 add to reel");
                 reelB.title = "append this clip to the chain at the bottom (it carries the setup that made it — ⚙ on its card brings that back)";
                 reelB.addEventListener("click", () => {
+                    // where this clip lands on the reel — measured BEFORE the
+                    // add, so it is the sum of everything already in front
+                    const atStart = reelKeptTotal() ?? 0;
                     reelAdd(name);
                     const l = reelGet();
                     const e2 = l[l.length - 1];
@@ -3191,6 +3271,7 @@ function attachTimeline(node) {
                             if (!(e2.in > 0)) e2.in = renderedSpan / FPS;
                         }
                         reelSet(l);
+                        soundtrackForClip(e2, atStart, renderedAt);
                         if (renderedSpan > 0)
                             toast(`added — in-trim auto-set to ${(renderedSpan / FPS).toFixed(2)}s `
                                 + `to drop the repeated context head (adjust on the card if you like)`);
@@ -3281,6 +3362,7 @@ function attachTimeline(node) {
                 run.autoAdvanced = false;   // one auto-advance per run
                 run.autoResult = null;
                 run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
+                run.guideAt = guideOffset() ?? 0;   // …and where in the song it was made
                 run.setup = captureSetupFields();   // the reel remembers how each clip was made
                 run.replaceTarget = state.reelTarget || null;   // armed by a card's ⚙
                 saveRes();   // a res you actually rendered at is the one worth remembering
@@ -3529,7 +3611,7 @@ function attachTimeline(node) {
             if (run.armed) { run.pid = detail?.prompt_id ?? null; run.armed = false; }
             // queued outside our ▶ (ComfyUI's own button): estimate the context
             // span from the live widgets instead of trusting a stale capture
-            else run.mcSpan = mcSpanFrames();
+            else { run.mcSpan = mcSpanFrames(); run.guideAt = guideOffset() ?? 0; }
         };
         const onProgress = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
@@ -4659,7 +4741,8 @@ function attachTimeline(node) {
             const musicFrom = gMus.follow ? 0 : (Number(gMus.offset) || 0);
             let music = null, reelClock = 0;
             let musicBase = Math.min(1, Number(gMus.level) || 0);
-            if (gMus.name) {
+            // same rule as the export: the ♪ lane wins if it has anything on it
+            if (gMus.name && !sfxGet()[0].length) {
                 music = document.createElement("audio");
                 music.preload = "auto";
                 music.src = inputFileUrl(gMus.name);
@@ -4990,7 +5073,7 @@ function attachTimeline(node) {
             background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
             borderRadius: "3px", fontSize: "11px", padding: "1px 3px", cursor: "pointer",
         });
-        guideUse.title = "what this music is for.\n\n'timing only': drawn on the timeline so you can place waypoints and text beats on the music. Changes nothing about the render or the export.\n\n'soundtrack': also mixed into ⇧ export as one video, under the clips. Its level and fades are the ♪ music fields in the REEL header.\n\n'model reference': also fed to the model as reference audio, so the generated sound imitates its character (it does not play the file back).\n\n'soundtrack + ref': both.";
+        guideUse.title = "what this music is for.\n\n'timing only': drawn on the timeline so you can place waypoints and text beats on the music. Changes nothing about the render or the export.\n\n'soundtrack': the song lands on the ♪ lane in AUDIO, one chip per clip, each cut to that clip's length — drag a chip to move it, drag its ends to trim, click it for volume and fades. Mixed into ⇧ export as one video, under the clips.\n\n'model reference': also fed to the model as reference audio, so the generated sound imitates its character (it does not play the file back).\n\n'soundtrack + ref': both.";
         for (const [v, label] of GUIDE_USES) {
             const o = el("option", null, label);
             o.value = v;
@@ -5013,9 +5096,15 @@ function attachTimeline(node) {
                 patch.refAdded = false;
             }
             guideSet(patch);
+            // clips already in the reel get their slice of the song on the ♪
+            // lane straight away — waiting for the NEXT render would leave the
+            // reel you can see silent, which reads as "it didn't work"
+            const filled = wantTrack ? backfillSoundtrack() : 0;
             refresh(true);
             toast(wantTrack && wantRef ? "music is now the soundtrack AND a model reference"
-                : wantTrack ? "music will be mixed into the export — level and fades are the ♪ music fields in the REEL header"
+                : wantTrack ? "music is on the ♪ lane"
+                    + (filled ? ` — ${filled} clip${filled > 1 ? "s" : ""} filled in, each cut to its own length` : "")
+                    + ". Drag a chip to move it, drag its ends to trim"
                 : wantRef ? "music sent to reference audio — the model will imitate its character"
                 : "music is timing-only again — nothing about the render or export changes");
         }
@@ -5409,6 +5498,7 @@ function attachTimeline(node) {
                 // continues from the same source the reject did
                 run.armed = true;
                 run.mcSpan = mcSpanFrames();
+                run.guideAt = guideOffset() ?? 0;
                 await app.queuePrompt(0);
                 toast("re-rolling — the new render will join the reel");
             } catch (e) {
@@ -5435,7 +5525,10 @@ function attachTimeline(node) {
                         fade_in: fx.fadeIn || 0,
                         fade_out: fx.fadeOut || 0,
                         fps: FPS,
-                        music: g2.name && (Number(g2.level) || 0) > 0
+                        // the legacy whole-reel bed, only while the ♪ lane is
+                        // empty — otherwise the lane's chips ARE the music and
+                        // sending both would mix the song in twice
+                        music: g2.name && (Number(g2.level) || 0) > 0 && !sfxGet()[0].length
                             ? { name: g2.name, level: Number(g2.level),
                                 from: g2.follow ? 0 : (Number(g2.offset) || 0),
                                 fade_in: Number(g2.musicFadeIn) || 0,
@@ -5498,115 +5591,24 @@ function attachTimeline(node) {
             flex: "0 0 auto", alignItems: "flex-start",
         });
 
-        // ---- FX TRACKS: three overlay lanes across the whole reel — drop
-        // samples (audio picker: files / mic / web search), drag them into
-        // place, each with its own volume and fades. Mixed at export;
-        // play-reel previews them live.
+        // ---- AUDIO LANES: four identical overlay lanes across the whole reel
+        // — drop samples (audio picker: files / mic / web search), drag them
+        // into place, each with its own volume, in/out slice and fades. Every
+        // lane holds as many or as few files as you like: one long bed across
+        // the whole reel, or a dozen stabs. Lane 0 is the ♪ soundtrack, where a
+        // clip's own music lands when you add it to the reel, cut to that
+        // clip's length. Mixed at export; play-reel previews them live.
         const sfxHead = el("div", {
             ...sectionHeadStyle(), display: "none", justifyContent: "space-between",
             gap: "16px", alignItems: "center",
         });
         sfxHead.appendChild(el("span", null,
-            "AUDIO — the soundtrack across the whole reel, then three FX lanes for placed sounds (band hit here, car engine there). Drag chips to place; click one for volume + fades. Everything here is previewed by ▶ play reel and mixed at export"));
+            "AUDIO — four lanes across the reel, each holding as many files as you like. ♪ is the soundtrack: a clip's own music lands there when you add it, cut to that clip's length. Drag chips to place; click one for volume, slice + fades. Previewed by ▶ play reel, mixed at export"));
 
-        // ♪ SOUNDTRACK lane: the music bed, shown where the rest of the audio
-        // lives instead of only as a number in the reel header
-        const trkRow = el("div", { display: "flex", gap: "8px", alignItems: "center" });
-        trkRow.appendChild(el("span", {
-            color: COL.text, fontSize: "10px", fontFamily: "monospace", width: "26px",
-        }, "♪"));
-        const trkLane = el("div", {
-            position: "relative", flex: "1", height: "24px", background: "#101010",
-            border: `1px solid ${COL.border}`, borderRadius: "3px", overflow: "hidden",
-            cursor: "pointer",
-        });
-        trkLane.title = "the music laid under the whole reel. Pick it in the TIMELINE header (♪ music) and set its use to 'soundtrack' — click here to choose one.";
-        trkLane.addEventListener("click", () => {
-            const g = node.properties?.h3_guide || {};
-            if (g.name) { guideApplyUse(g.use === "both" ? "ref" : "guide", g.name); return; }
-            openAudioPicker((n) => {
-                state.guideAudio = null;
-                guideSet({ name: n });
-                guideApplyUse("track", n);
-            });
-        });
-        const trkVol = el("input");
-        trkVol.type = "range"; trkVol.min = "0"; trkVol.max = "150"; trkVol.step = "5";
-        Object.assign(trkVol.style, { width: "110px", accentColor: COL.slider, cursor: "pointer" });
-        trkVol.title = "soundtrack level in the export (and in ▶ play reel / the render preview)";
-        trkVol.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-        trkVol.addEventListener("input", () => {
-            const v = parseInt(trkVol.value, 10) / 100;
-            node.properties = node.properties || {};
-            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v,
-                use: v > 0 ? ((node.properties.h3_guide || {}).use === "ref"
-                    || (node.properties.h3_guide || {}).use === "both" ? "both" : "track")
-                    : ((node.properties.h3_guide || {}).use === "both" ? "ref" : "guide") };
-            trkPct.textContent = Math.round(v * 100) + "%";
-            fill();
-        });
-        const trkPct = el("span", { color: COL.text, fontSize: "10px",
-            fontFamily: "monospace", minWidth: "34px", textAlign: "right" }, "0%");
-        // own field builder: sfxField is declared further down, so using it
-        // here would blow up at setup time
-        const trkField = () => {
-            const f = el("input");
-            Object.assign(f.style, {
-                width: "36px", background: COL.input, color: COL.bright,
-                border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
-                padding: "2px 4px", fontFamily: "monospace", textAlign: "center",
-            });
-            f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
-            return f;
-        };
-        const trkFi = trkField(), trkFo = trkField();
-        trkFi.title = "soundtrack fade in, seconds";
-        trkFo.title = "soundtrack fade out, seconds";
-        const trkFade = (f, key) => f.addEventListener("blur", () => {
-            const v = Math.max(0, Math.min(15, parseFloat(f.value) || 0));
-            node.properties = node.properties || {};
-            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), [key]: v };
-            fill();
-        });
-        trkFade(trkFi, "musicFadeIn");
-        trkFade(trkFo, "musicFadeOut");
-        trkRow.append(trkLane, trkVol, trkPct,
-            el("span", { color: COL.text, fontSize: "10px" }, "fade"), trkFi,
-            el("span", { color: COL.text, fontSize: "10px" }, "/"), trkFo);
-        // NB: the row is appended below, once sfxWrap exists — appending here
-        // reads sfxWrap before its const and throws, taking the overlay with it
-
-        function renderSoundtrackLane() {
-            const g = node.properties?.h3_guide || {};
-            const lvl = Number(g.level) || 0;
-            trkLane.textContent = "";
-            if (!g.name) {
-                trkLane.appendChild(el("div", {
-                    position: "absolute", inset: "0", display: "flex", alignItems: "center",
-                    padding: "0 8px", color: "#666", fontSize: "11px",
-                }, "no soundtrack — click to add music across the whole reel"));
-            } else {
-                const nm = g.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
-                trkLane.appendChild(el("div", {
-                    position: "absolute", inset: "1px", borderRadius: "2px",
-                    background: lvl > 0 ? "rgba(120,170,255,0.22)" : "rgba(120,120,120,0.12)",
-                    border: `1px solid ${lvl > 0 ? COL.slider : COL.border}`,
-                    display: "flex", alignItems: "center", padding: "0 8px",
-                    color: lvl > 0 ? COL.bright : COL.text, fontSize: "11px",
-                    fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden",
-                }, "♪ " + nm + (lvl > 0 ? "" : "  (timing only — not in the export)")));
-            }
-            if (document.activeElement !== trkVol) trkVol.value = String(Math.round(lvl * 100));
-            trkPct.textContent = Math.round(lvl * 100) + "%";
-            trkPct.style.color = lvl > 0 ? COL.bright : "#666";
-            if (document.activeElement !== trkFi) trkFi.value = String(Number(g.musicFadeIn) || 0);
-            if (document.activeElement !== trkFo) trkFo.value = String(Number(g.musicFadeOut) || 0);
-        }
         const sfxWrap = el("div", {
             display: "none", flexDirection: "column", gap: "4px",
             padding: "4px 16px 10px", flex: "0 0 auto",
         });
-        sfxWrap.appendChild(trkRow);   // ♪ soundtrack sits above the fx lanes
         // Two-click confirms on reel CARDS have to live outside the button:
         // fill() calls renderReel(), which rebuilds every card, so a flag
         // stored on the element was wiped by any refresh (a thumbnail
@@ -5621,15 +5623,20 @@ function attachTimeline(node) {
         for (let t = 0; t < SFX_TRACKS; t++) {
             const rowEl = el("div", { display: "flex", gap: "8px", alignItems: "center" });
             rowEl.appendChild(el("span", {
-                color: COL.text, fontSize: "10px", fontFamily: "monospace", width: "26px",
-            }, "fx" + (t + 1)));
+                color: t === 0 ? COL.slider : COL.text, fontSize: "10px",
+                fontFamily: "monospace", width: "26px",
+            }, TRACK_LABELS[t]));
             const laneEl = el("div", {
-                position: "relative", flex: "1", height: "22px",
+                position: "relative", flex: "1", height: t === 0 ? "24px" : "22px",
                 background: "#101010", border: `1px solid ${COL.border}`, borderRadius: "3px",
                 overflow: "hidden",
             });
+            if (t === 0)
+                laneEl.title = "♪ soundtrack — a clip's own music lands here when you add the "
+                    + "clip to the reel, cut to that clip's length. Holds as many files as you "
+                    + "like, same as the fx lanes: drag a chip to move it, drag either end to trim.";
             const addB2 = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "+");
-            addB2.title = "add a sample to this track (input folder, upload, mic, or the free web search) — it lands after the track's last sample; drag it into place";
+            addB2.title = "add a sample to this lane (input folder, upload, mic, or the free web search) — it lands after the lane's last sample; drag it into place, drag its ends to trim";
             addB2.addEventListener("click", () => openAudioPicker((n) => {
                 const tracks = sfxGet().map((x) => x.slice());
                 const lane = tracks[t];
@@ -5665,18 +5672,16 @@ function attachTimeline(node) {
         };
         const sfxName = el("span", { color: COL.bright, fontSize: "11px", maxWidth: "180px",
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
-        const sfxAt = sfxField(50);
-        sfxAt.title = "where the sample starts on the reel, in seconds";
         const sfxVol = sfxField(42);
         sfxVol.title = "this sample's volume, percent (up to 150)";
         const sfxFi = sfxField(36);
         sfxFi.title = "fade in, seconds (the sample's own head)";
         const sfxFo = sfxField(36);
         sfxFo.title = "fade out, seconds (the sample's own tail)";
-        const sfxIn = sfxField(42);
-        sfxIn.title = "use only part of the file: start point WITHIN the sample, seconds";
-        const sfxOut = sfxField(42);
-        sfxOut.title = "end point within the sample, seconds (0 = to its end)";
+        // position and slice are DRAGGED on the chip, not typed — this is the
+        // read-out of what the drag did
+        const sfxSpan = el("span", { color: COL.text, fontSize: "11px",
+            fontFamily: "monospace" });
         const sfxSelEntry = () => sfxSel ? sfxGet()[sfxSel.t]?.[sfxSel.i] : null;
         const sfxPatch = (patch) => {
             if (!sfxSel) return;
@@ -5686,10 +5691,6 @@ function attachTimeline(node) {
             tracks[sfxSel.t][sfxSel.i] = { ...s, ...patch };
             sfxSet(tracks);
         };
-        sfxAt.addEventListener("blur", () => {
-            const v = parseFloat(sfxAt.value);
-            sfxPatch({ at: isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : 0 });
-        });
         sfxVol.addEventListener("blur", () => {
             const v = Math.max(0, Math.min(150, parseFloat(sfxVol.value) || 0));
             sfxPatch({ level: v / 100 });
@@ -5701,14 +5702,6 @@ function attachTimeline(node) {
         sfxFo.addEventListener("blur", () => {
             const v = Math.max(0, Math.min(15, parseFloat(sfxFo.value) || 0));
             sfxPatch({ fadeOut: v });
-        });
-        sfxIn.addEventListener("blur", () => {
-            const v = parseFloat(sfxIn.value);
-            sfxPatch({ in: isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : 0 });
-        });
-        sfxOut.addEventListener("blur", () => {
-            const v = parseFloat(sfxOut.value);
-            sfxPatch({ out: isFinite(v) && v > 0 ? Math.round(v * 10) / 10 : 0 });
         });
         let sfxPrev = null;
         const sfxPlayB = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "▶");
@@ -5745,11 +5738,8 @@ function attachTimeline(node) {
             sfxSel = null;
             sfxSet(tracks);
         });
-        sfxEd.append(sfxName,
-            el("span", null, "at"), sfxAt, el("span", null, "s ·"),
+        sfxEd.append(sfxName, sfxSpan,
             el("span", null, "vol"), sfxVol, el("span", null, "% ·"),
-            el("span", null, "clip"), sfxIn, el("span", null, "–"), sfxOut,
-            el("span", null, "s ·"),
             el("span", null, "fade"), sfxFi, el("span", null, "/"), sfxFo,
             el("span", null, "s"), sfxPlayB, sfxDelB);
         // the audible span of a sample: its in→out window, capped by file length
@@ -5761,7 +5751,6 @@ function attachTimeline(node) {
         };
 
         function renderSfx() {
-            renderSoundtrackLane();
             const tracks = sfxGet();
             const any = tracks.some((x) => x.length);
             const show = reelGet().length || any
@@ -5775,13 +5764,15 @@ function attachTimeline(node) {
                 laneEl.textContent = "";
                 lane.forEach((s, i) => {
                     const dur = state.sfxMeta.get(s.name) ?? ensureSfxDur(s.name) ?? 0;
+                    const sel = sfxSel && sfxSel.t === t && sfxSel.i === i;
+                    const hue = t === 0 ? COL.slider : COL.green;
                     const chip = el("div", {
                         position: "absolute", top: "2px", bottom: "2px",
-                        background: "rgba(158,228,147,0.28)",
-                        border: `1px solid ${sfxSel && sfxSel.t === t && sfxSel.i === i ? COL.sel : COL.green}`,
+                        background: t === 0 ? "rgba(120,170,255,0.24)" : "rgba(158,228,147,0.28)",
+                        border: `1px solid ${sel ? COL.sel : hue}`,
                         borderRadius: "3px", color: COL.bright, fontSize: "10px",
-                        fontFamily: "monospace", padding: "1px 4px", cursor: "grab",
-                        overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis",
+                        fontFamily: "monospace", cursor: "grab",
+                        overflow: "hidden", whiteSpace: "nowrap",
                         touchAction: "none", userSelect: "none",
                     });
                     const at = Number(s.at) || 0;
@@ -5793,34 +5784,81 @@ function attachTimeline(node) {
                         chip.style.left = (i * 70) + "px";
                         chip.style.width = "64px";
                     }
-                    chip.textContent = s.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
-                    chip.title = `${chip.textContent} — at ${at.toFixed(1)}s, ${Math.round(sfxLevel(s) * 100)}%`
-                        + `, ${seg.toFixed(1)}s used` + (dur ? ` of ${dur.toFixed(1)}s` : "")
-                        + ". Drag to move; click to edit.";
-                    chip.addEventListener("pointerdown", (ev) => {
+                    // the name sits inside, clear of the two trim grips
+                    const lbl = el("div", {
+                        position: "absolute", inset: "0", padding: "1px 8px",
+                        display: "flex", alignItems: "center", overflow: "hidden",
+                        whiteSpace: "nowrap", textOverflow: "ellipsis",
+                        pointerEvents: "none",
+                    }, s.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop());
+                    chip.appendChild(lbl);
+                    const inP = Math.max(0, Number(s.in) || 0);
+                    const outP = Number(s.out) > 0 ? Number(s.out) : (dur || 0);
+                    chip.title = `${lbl.textContent} — starts at ${at.toFixed(1)}s on the reel, `
+                        + `playing ${inP.toFixed(1)}–${(outP || inP + seg).toFixed(1)}s of the file `
+                        + `(${seg.toFixed(1)}s${dur ? " of " + dur.toFixed(1) + "s" : ""}), `
+                        + `${Math.round(sfxLevel(s) * 100)}%. Drag the middle to move it, `
+                        + `drag either end to trim. Click for volume and fades.`;
+                    // grab zones: a 7px grip at each end trims, the middle moves
+                    const grip = (side) => {
+                        const g = el("div", {
+                            position: "absolute", top: "0", bottom: "0", width: "7px",
+                            [side]: "0", cursor: "ew-resize",
+                            background: sel ? COL.sel : hue, opacity: sel ? "0.85" : "0.45",
+                        });
+                        return g;
+                    };
+                    const gL = grip("left"), gR = grip("right");
+                    chip.append(gL, gR);
+                    // one handler for all three drags — mode decides what moves
+                    const startDrag = (mode) => (ev) => {
                         ev.preventDefault();
-                        chip.setPointerCapture(ev.pointerId);
+                        ev.stopPropagation();
+                        const host = mode === "move" ? chip : (mode === "in" ? gL : gR);
+                        host.setPointerCapture(ev.pointerId);
                         const rect = laneEl.getBoundingClientRect();
                         const startX = ev.clientX;
-                        let moved = false, newAt = at;
+                        const perSec = tot ? rect.width / tot : 0;
+                        let moved = false, patch = null;
                         const move = (e2) => {
                             if (Math.abs(e2.clientX - startX) > 3) moved = true;
-                            if (!moved || !tot) return;
-                            newAt = Math.min(Math.max(0,
-                                (e2.clientX - rect.left) / rect.width * tot), Math.max(0, tot - 0.1));
-                            newAt = Math.round(newAt * 10) / 10;
-                            chip.style.left = Math.min(97, newAt / tot * 100) + "%";
+                            if (!moved || !perSec) return;
+                            const d = Math.round(((e2.clientX - startX) / perSec) * 10) / 10;
+                            if (mode === "move") {
+                                const nAt = Math.min(Math.max(0, at + d), Math.max(0, tot - 0.1));
+                                patch = { at: Math.round(nAt * 10) / 10 };
+                                chip.style.left = nAt / tot * 100 + "%";
+                            } else if (mode === "in") {
+                                // trim the head: the content stays put on the
+                                // reel, so the start slides with the in-point
+                                const room = (outP || inP + seg) - 0.1;
+                                const nIn = Math.min(Math.max(0, inP + d), Math.max(0, room));
+                                const nAt = Math.max(0, at + (nIn - inP));
+                                patch = { in: nIn, at: Math.round(nAt * 10) / 10 };
+                                chip.style.left = nAt / tot * 100 + "%";
+                                chip.style.width = Math.max(0.4,
+                                    ((outP || inP + seg) - nIn) / tot * 100) + "%";
+                            } else {
+                                const cap = dur || Infinity;
+                                const nOut = Math.min(Math.max(inP + 0.1,
+                                    (outP || inP + seg) + d), cap);
+                                patch = { out: nOut };
+                                chip.style.width = Math.max(0.4, (nOut - inP) / tot * 100) + "%";
+                            }
                         };
                         const up = () => {
-                            chip.removeEventListener("pointermove", move);
-                            chip.removeEventListener("pointerup", up);
+                            host.removeEventListener("pointermove", move);
+                            host.removeEventListener("pointerup", up);
                             sfxSel = { t, i };
-                            if (moved) sfxPatch({ at: newAt });
+                            if (moved && patch) sfxPatch(patch);
                             else renderSfx();   // click = select
                         };
-                        chip.addEventListener("pointermove", move);
-                        chip.addEventListener("pointerup", up);
-                    });
+                        host.addEventListener("pointermove", move);
+                        host.addEventListener("pointerup", up);
+                    };
+                    chip.addEventListener("pointerdown", startDrag("move"));
+                    gL.addEventListener("pointerdown", startDrag("in"));
+                    gR.addEventListener("pointerdown", startDrag("out"));
                     laneEl.appendChild(chip);
                 });
             });
@@ -5829,13 +5867,15 @@ function attachTimeline(node) {
             sfxEd.style.display = s ? "flex" : "none";
             if (s) {
                 sfxName.textContent = "♪ " + s.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
-                if (document.activeElement !== sfxAt) sfxAt.value = String(Number(s.at) || 0);
+                const sIn = Math.max(0, Number(s.in) || 0);
+                const sSeg = sfxSegLen(s);
+                sfxSpan.textContent = `· ${(Number(s.at) || 0).toFixed(1)}s on the reel, `
+                    + `${sIn.toFixed(1)}–${(sIn + sSeg).toFixed(1)}s of the file `
+                    + `(${sSeg.toFixed(1)}s) — drag the chip to change ·`;
                 if (document.activeElement !== sfxVol)
                     sfxVol.value = String(Math.round(sfxLevel(s) * 100));
                 if (document.activeElement !== sfxFi) sfxFi.value = String(Number(s.fadeIn) || 0);
                 if (document.activeElement !== sfxFo) sfxFo.value = String(Number(s.fadeOut) || 0);
-                if (document.activeElement !== sfxIn) sfxIn.value = String(Number(s.in) || 0);
-                if (document.activeElement !== sfxOut) sfxOut.value = String(Number(s.out) || 0);
             }
         }
 
