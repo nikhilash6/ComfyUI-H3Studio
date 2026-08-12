@@ -180,6 +180,16 @@ reference *video* is the expensive part — every frame's rows ride every sampli
 step. Cap it with **video refs MP** (`0.4` is a good start). The references
 header shows a live cost meter.
 
+## The nodes
+
+| Node | For |
+|---|---|
+| **H3 Studio (Image to Video)** | The main event — everything above happens here |
+| **H3 Soft Denoise Zone (v2v)** | Restyle one region of the footage; feathered, no matte line |
+| **H3 Regional Prompt (mask)** | Point part of the prompt at the masked region |
+| **H3 Basic Scheduler (wired denoise)** | Core's scheduler with denoise as a socket, so v2v_denoise drives it. Its `rescale` mode also fixes core's dead zone at high denoise |
+| **MiniMax H3 Temporal LoRA Blend** | Different LoRA weights before and after a moment inside the clip |
+
 ## Honest limits
 
 - **Waypoints are out of distribution.** H3 was trained on first/last anchors
