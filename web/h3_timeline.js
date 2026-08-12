@@ -475,6 +475,7 @@ function attachTimeline(node) {
         sfxMeta: new Map(),  // fx sample name -> duration (seconds) | null loading | 0 failed
         firstCrop: null, lastCrop: null, midCrops: [], refCrops: [], videoCrops: [],
         sel: null,           // {kind:'first'|'last'|'mid'|'beat'|'ref', i?}
+        snapHit: null,       // the hit a drag is currently locked onto (drawn lit)
         reelTarget: null,    // {idx, name} armed by a reel card's ⚙ — offer replace
         auto: null,          // Auto Motion Mode flag, owned by the fullscreen editor
         drag: null, syncing: false, specError: null,
@@ -694,21 +695,44 @@ function attachTimeline(node) {
         return null;
     }
 
-    function guideSnapFrac(frac, tolFrac) {
+    // Hits as positions ON THIS CLIP'S GRID. Everything downstream quantises a
+    // marker to a frame, so the hits have to be expressed as frames too --
+    // otherwise a snap lands on the hit and is then rounded off it again (the
+    // music offset is not frame-aligned), which is exactly why snapping looked
+    // like it did nothing. Drawing and snapping share this list, so a tick and
+    // the marker that snaps to it are the same position by construction.
+    function guideHitFracs() {
         const g = node.properties?.h3_guide || {};
         const ga = state.guideAudio;
-        if (!g.snap || !g.name || ga?.name !== g.name || !ga?.onsets?.length) return frac;
+        if (!g.name || ga?.name !== g.name || !ga?.onsets?.length) return null;
         const off = guideOffset();
-        if (off == null) return frac;
-        const winS = fc() / FPS;
-        const t = off + frac * winS;
-        let bd = 1e9, best = null;
+        if (off == null) return null;
+        const F = fc();
+        const winS = F / FPS;
+        const out = [];
         for (const o of ga.onsets) {
-            const d = Math.abs(o - t);
-            if (d < bd) { bd = d; best = o; }
+            if (o < off || o > off + winS) continue;
+            const raw = (o - off) / winS;
+            const q = roundHalfEven(raw * (F - 1)) / (F - 1);   // the clip's grid
+            if (q >= 0 && q <= 1 && (!out.length || Math.abs(q - out[out.length - 1]) > 1e-9))
+                out.push(q);
         }
-        if (best == null || bd > (tolFrac || 0.01) * winS) return frac;
-        return Math.min(1, Math.max(0, (best - off) / winS));
+        return out;
+    }
+
+    function guideSnapFrac(frac, tolFrac) {
+        state.snapHit = null;
+        if (!node.properties?.h3_guide?.snap) return frac;
+        const hits = guideHitFracs();
+        if (!hits || !hits.length) return frac;
+        let bd = 1e9, best = null;
+        for (const h of hits) {
+            const d = Math.abs(h - frac);
+            if (d < bd) { bd = d; best = h; }
+        }
+        if (best == null || bd > (tolFrac || 0.02)) return frac;
+        state.snapHit = best;      // renderTrack lights this tick up
+        return best;
     }
 
     // ---- widget <-> state sync -------------------------------------------
@@ -4853,16 +4877,19 @@ function attachTimeline(node) {
             if (g0.use === "track" || g0.use === "both") guideApplyUse(g0.use, n);
         }));
         // audition the music under this clip, from wherever the window starts
-        let guidePrev = null;
+        let guidePrev = null, guideRaf = 0;
         const guidePlayB = el("button", { ...btnStyle, padding: "1px 8px", fontSize: "11px" }, "▶");
-        guidePlayB.title = "hear the music under this clip — plays the exact window the timeline is showing, so you can check your waypoints land where you think";
+        guidePlayB.title = "play the music under this clip while a playhead sweeps the timeline — so you can SEE and HEAR whether your waypoints and beats land on the hits. Starts from the playhead if you've dragged one (click anywhere on the track to place it), otherwise from the start of the window.";
         const stopGuidePrev = () => {
+            cancelAnimationFrame(guideRaf);
+            guideRaf = 0;
             if (!guidePrev) return;
             try { guidePrev.pause(); guidePrev.removeAttribute("src"); guidePrev.load(); }
             catch (e) { /* gone */ }
             guidePrev = null;
             guidePlayB.textContent = "▶";
             guidePlayB.style.color = COL.bright;
+            renderTrack();
         };
         guidePlayB.addEventListener("click", () => {
             if (guidePrev) { stopGuidePrev(); return; }
@@ -4870,19 +4897,30 @@ function attachTimeline(node) {
             if (!g.name) return;
             const off = guideOffset();
             if (off == null) { toast("still reading the reel's clip durations…", true); return; }
+            const winS = fc() / FPS;
+            // resume from the playhead you dragged, like any transport
+            const from = (scrubFrac != null && scrubFrac < 0.999) ? scrubFrac : 0;
+            const stopAt = off + winS;
             guidePrev = document.createElement("audio");
             guidePrev.src = inputFileUrl(g.name);
-            guidePrev.volume = Math.min(1, Number(g.level) || 0.8);
-            const stopAt = off + fc() / FPS;
-            guidePrev.addEventListener("loadedmetadata",
-                () => { if (guidePrev) guidePrev.currentTime = off; }, { once: true });
-            guidePrev.addEventListener("timeupdate", () => {
-                if (guidePrev && guidePrev.currentTime >= stopAt) stopGuidePrev();
-            });
+            guidePrev.volume = Math.min(1, Number(g.level) > 0 ? Number(g.level) : 0.85);
+            guidePrev.addEventListener("loadedmetadata", () => {
+                if (guidePrev) guidePrev.currentTime = off + from * winS;
+            }, { once: true });
             guidePrev.addEventListener("ended", stopGuidePrev);
             guidePrev.play().catch(() => {});
             guidePlayB.textContent = "⏸";
             guidePlayB.style.color = COL.green;
+            // the playhead IS the feedback: sweep it in step with the audio
+            const sweep = () => {
+                if (!guidePrev) return;
+                if (guidePrev.currentTime >= stopAt) { stopGuidePrev(); return; }
+                scrubFrac = Math.min(1, Math.max(0,
+                    (guidePrev.currentTime - off) / winS));
+                renderTrack();
+                guideRaf = requestAnimationFrame(sweep);
+            };
+            guideRaf = requestAnimationFrame(sweep);
         });
         const guideOffLab = el("span", { fontSize: "11px", color: COL.text }, "at");
         const guideOff = dimField(46);
@@ -6704,20 +6742,22 @@ function attachTimeline(node) {
                         const lo = gaReady.peaks[b * 2], hi = gaReady.peaks[b * 2 + 1];
                         ctx.fillRect(T.x0 + px, T.by + lo * 14, 1, Math.max(1, (hi - lo) * 14));
                     }
-                    // detected hits: full-height ticks through the lane, not the
-                    // 6px slivers they were — you have to be able to aim at them
-                    ctx.globalAlpha = gg.snap ? 1.0 : 0.7;
-                    ctx.fillStyle = COL.green;
-                    for (const t of gaReady.onsets) {
-                        if (t < off || t > off + winS) continue;
-                        const x = T.x0 + ((t - off) / winS) * W;
-                        ctx.fillRect(x - 1, T.by - 22, 2, 12);
-                        ctx.fillRect(x - 1, T.by - 6, 2, 24);
-                        if (gg.snap) {   // snap targets get a head you can see
-                            ctx.beginPath();
-                            ctx.arc(x, T.by - 24, 2.6, 0, Math.PI * 2);
-                            ctx.fill();
-                        }
+                    // Hits, drawn from the SAME frame-quantised list snapping
+                    // uses — so a tick is literally a position a marker can
+                    // occupy, and a snapped marker sits on it exactly.
+                    const hits = guideHitFracs() || [];
+                    ctx.globalAlpha = gg.snap ? 1.0 : 0.55;
+                    for (const hf of hits) {
+                        const x = fracToX(T, hf);
+                        const near = state.snapHit != null
+                            && Math.abs(hf - state.snapHit) < 1e-9;
+                        ctx.fillStyle = near ? COL.bright : COL.green;
+                        // a full-height guide line: you aim at these
+                        ctx.fillRect(x - (near ? 1.5 : 1), T.ruler + 6,
+                                     near ? 3 : 2, T.by + 6 - (T.ruler + 6));
+                        ctx.beginPath();
+                        ctx.arc(x, T.ruler + 6, near ? 4 : 3, 0, Math.PI * 2);
+                        ctx.fill();
                     }
                     ctx.restore();
                     ctx.fillStyle = COL.text;
@@ -6874,7 +6914,8 @@ function attachTimeline(node) {
                 // …then show the FRAME-snapped value that will actually be written
                 m.frac = roundHalfEven(m.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, m.frac),
-                    text: `${timeOf(m.frac).toFixed(2)}s · f${frameOf(m.frac)} · ${m.strength.toFixed(2)}` };
+                    text: `${timeOf(m.frac).toFixed(2)}s · f${frameOf(m.frac)} · ${m.strength.toFixed(2)}`
+                        + (state.snapHit != null ? " · ♪ on hit" : "") };
                 if (scrubSource()) showFramePreview(m.frac);   // the frame it will anchor over
                 pushMids();
             } else if (d.kind === "beattime") {
@@ -6883,7 +6924,8 @@ function attachTimeline(node) {
                 b.frac = guideSnapFrac(b.frac, 18 / (T.x1 - T.x0));   // ♪ snap first
                 b.frac = roundHalfEven(b.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, b.frac),
-                    text: `${timeOf(b.frac).toFixed(2)}s · f${frameOf(b.frac)}` };
+                    text: `${timeOf(b.frac).toFixed(2)}s · f${frameOf(b.frac)}`
+                        + (state.snapHit != null ? " · ♪ on hit" : "") };
                 if (scrubSource()) showFramePreview(b.frac);
                 pushBeats();
             } else if (d.kind === "strength") {
@@ -6904,6 +6946,7 @@ function attachTimeline(node) {
             const wasClick = wasScrub && state.drag.maybeClick;
             state.drag = null;
             state.dragReadout = null;
+            state.snapHit = null;
             hideFramePreview();
             try { track.releasePointerCapture(ev.pointerId); } catch (e) { /* released */ }
             if (wasClick) { state.sel = null; fill(); }   // lane click = deselect (playhead moves too)
