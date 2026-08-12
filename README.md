@@ -73,10 +73,10 @@ own frame, and has no effect at all unless that frame is connected.
 | `> 1.0` | Overdrive — amplifies the latent and pushes adherence past stock |
 
 **The two ends are not symmetrical in practice.** The first frame is H3's geometry
-anchor — it's stretched to fill the canvas and establishes the shot, so it
-generally wants a higher value than the end frame. The last frame is a follower,
-cover-cropped to preserve aspect, and takes dilution far more gracefully. If
-you're only going to loosen one, loosen the last.
+anchor — it establishes the shot, so it generally wants a higher value than the
+end frame. The last frame is a follower and takes dilution far more gracefully.
+If you're only going to loosen one, loosen the last. Both are cover-cropped to
+the canvas, preserving aspect; use the ⛶ framer to choose what the crop keeps.
 
 Useful combinations:
 
@@ -186,8 +186,8 @@ image large, with a draggable, zoomable crop window — and for keyframes that w
 is **locked to the generation's output aspect** (the node's own `width`×`height`).
 The dimmed area is exactly what the model will *not* see.
 
-This closes a hole every keyframe workflow has: a mismatched first frame normally
-gets silently **stretched** (distortion) and mids/last get a **blind centre-crop**.
+This closes a hole every keyframe workflow has: a mismatched keyframe otherwise
+gets a **blind centre-crop**, quietly losing whatever sat at the edges.
 With a framing set, the downstream resize is distortion-free *by construction* —
 what you framed is what the model sees. Thumbnails and the inspector preview render
 the framed view, not the raw file.
@@ -350,7 +350,7 @@ don't have to count.
 |---|---|
 | `ref_spec` | One strength per image, in slot order. Empty = `1.0` for all. `0.7` softens a reference into a likeness hint rather than a lock. (Or just drag the sliders on the timeline.) |
 | `ref_image_size` | `match` scales each reference to the generation's pixel area. `max` uses the 2048px short edge for best identity fidelity. |
-| `ref_megapixels` | Optional area cap, e.g. `0.4`. Overrides `ref_image_size` when above 0 — each reference is scaled down (never up) to at most this many megapixels, so no external resize nodes are needed. Keyframe inputs never need capping; they're stretched to the generation canvas regardless. Sizes round to the model's 32px grid, so the result can land a hair over the cap. `0` = off. |
+| `ref_megapixels` | Optional area cap, e.g. `0.4`. Overrides `ref_image_size` when above 0 — each reference is scaled down (never up) to at most this many megapixels, so no external resize nodes are needed. Keyframe inputs never need capping; they're cover-cropped to the generation canvas regardless. Sizes round to the model's 32px grid, so the result can land a hair over the cap. `0` = off. |
 
 **`max` is expensive.** Reference rows ride through *every* sampling step. On a
 3000×2000 source: `match` costs 1014 sequence rows, `max` costs 5828 — against a

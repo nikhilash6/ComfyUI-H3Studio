@@ -243,8 +243,8 @@ def encode_ref_image(vae, img, width, height, ref_image_size, megapixels=0.0):
     area; 'max' uses the reference pipeline's 2048px short edge for best identity
     fidelity. Reference rows ride through every sampling step, so 'max' is costly.
     A megapixels value > 0 overrides both with an explicit area cap (down only) --
-    keyframes never need this (they are stretched to the canvas regardless), so it
-    applies to references alone.
+    keyframes never need this (they are cover-cropped to the canvas regardless), so
+    it applies to references alone.
     """
     h, w = img.shape[1], img.shape[2]
     if megapixels > 0.0:
@@ -717,7 +717,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 io.Combo.Input("ref_image_size", options=["match", "max"], default="match",
                     tooltip="Reference image sizing. 'match' scales each reference (down only, keeping aspect) to the generation's pixel area. 'max' uses the reference pipeline's 2048px short edge for best identity fidelity. Reference rows ride through EVERY sampling step, so 'max' can be several times slower. Ignored when ref_megapixels is set."),
                 io.Float.Input("ref_megapixels", default=0.0, min=0.0, max=8.0, step=0.05,
-                    tooltip="Optional area cap for reference images, in megapixels -- e.g. 0.4. Overrides ref_image_size when above 0, scaling each reference down (never up) to at most this many pixels, so no external resize nodes are needed. Keyframe inputs never need capping: they are always stretched to the generation canvas anyway. 0 = off."),
+                    tooltip="Optional area cap for reference images, in megapixels -- e.g. 0.4. Overrides ref_image_size when above 0, scaling each reference down (never up) to at most this many pixels, so no external resize nodes are needed. Keyframe inputs never need capping: they are always fitted to the generation canvas anyway (aspect-preserving cover-crop). 0 = off."),
                 io.Float.Input("ref_audio_strength", default=1.0, min=0.0, max=2.0, step=0.05,
                     tooltip="Strength for every connected reference audio. 1.0 is a firm lock on the voice/sound character; lower loosens it. Note H3 leaves audio conditioning completely clean by default (its audio_cond_noise_aug is 1.0, i.e. no noise at all), so this dial is the only way to soften an audio reference."),
                 io.Vae.Input("audio_vae", optional=True,
@@ -992,7 +992,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             last_frame = load_input_image(last_frame_file.strip(), "last_frame_file")
 
         # user-chosen framing: keyframe windows are locked to the generation aspect,
-        # so the stretch/cover resizes below become distortion-free by construction
+        # so the cover-crop resizes below become distortion-free by construction
         if first_frame is not None:
             first_frame = apply_crop(first_frame,
                                      parse_crop_spec(first_frame_crop, 1, "first_frame_crop")[0],
@@ -1279,8 +1279,12 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                               "strength": strength, "noise_seed": seed})
 
         if first_frame is not None:
-            # geometry anchor: plain stretch to canvas
-            add(_resize(first_frame[:1], width, height, "disabled"), 0,
+            # aspect-preserving cover-crop, same as the waypoints and the last
+            # frame. A stretch distorts faces and straight lines for the whole
+            # clip, since the model follows this frame's geometry; a crop keeps
+            # the shapes and loses the edges instead, and first_frame_crop is
+            # there to choose WHICH edges when the default framing is wrong.
+            add(_resize(first_frame[:1], width, height, "center"), 0,
                 first_frame_strength, FIRST_FRAME_NOISE_SEED)
         for img, entry in sorted(zip(mids, spec), key=lambda p: p[1]["index"]):
             # waypoints follow the last frame's convention: aspect-preserving cover-crop.

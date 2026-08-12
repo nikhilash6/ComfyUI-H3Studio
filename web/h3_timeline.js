@@ -6260,25 +6260,23 @@ function attachTimeline(node) {
                 row3.appendChild(x);
             } else row3.appendChild(el("span", { color: "#555", fontSize: "10px" }, "via graph"));
             foot.append(row1, row2, row3);
-            // unframed + aspect mismatch = silent distortion at encode time
-            // (first frame stretches, waypoints/last center-crop — core's own
-            // conventions). Announce it and make the fix one click.
+            // unframed + aspect mismatch = the edges go, silently. Every
+            // keyframe cover-crops now, so say which edges and make the fix
+            // one click.
             if (!entCrop && entity.img?.naturalWidth && effWH()) {
                 const [oW, oH] = effWH();
                 const ia = entity.img.naturalWidth / entity.img.naturalHeight;
                 if (Math.abs(ia / (oW / oH) - 1) > 0.02) {
+                    const wide = ia > oW / oH;   // wider than the clip: sides go
                     const warn = el("div", {
                         color: COL.mid, fontSize: "10px", cursor: "pointer",
                         whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                    }, entity.kind === "first"
-                        ? "⚠ aspect differs — will STRETCH · ⛶ to choose"
-                        : "⚠ aspect differs — will edge-crop · ⛶ to choose");
+                    }, `⚠ aspect differs — ${wide ? "sides" : "top/bottom"} cropped · ⛶ to choose`);
                     warn.title = "this image is "
                         + entity.img.naturalWidth + "×" + entity.img.naturalHeight
-                        + " but the clip is " + oW + "×" + oH + " — without a framing the model "
-                        + (entity.kind === "first"
-                            ? "stretches it to fit (squish)."
-                            : "center-crops it (edges lost).")
+                        + " but the clip is " + oW + "×" + oH + " — without a framing it is "
+                        + "centre-cropped to fit, losing the "
+                        + (wide ? "left and right edges." : "top and bottom.")
                         + " Click to frame it yourself.";
                     warn.addEventListener("click", (ev) => {
                         ev.stopPropagation();
