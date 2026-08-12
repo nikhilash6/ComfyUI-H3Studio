@@ -3,9 +3,12 @@ import logging
 from .h3_studio import comfy_entrypoint
 
 # The turbo LoRA rebuilds the DiT's adaln row table itself and omits audio
-# conditioning, so any reference audio crashes it. Patch at import, before any
-# workflow runs -- the buggy call site is a closure built when the LoRA is applied,
-# so this has to be in place first. No-op when that pack is not installed.
+# conditioning, so any reference audio crashes it. Patch before any workflow runs --
+# the buggy call site is a closure built when the LoRA is applied, so this has to be
+# in place first. If the turbo pack has not loaded yet (custom_nodes import in
+# alphabetical order, and "H3Studio" comes before "MiniMax-H3-Turbo"), this arranges
+# to patch at the start of the next prompt instead, which is still before any node
+# executes. No-op when that pack is not installed.
 try:
     from . import turbo_compat
 

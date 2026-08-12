@@ -167,6 +167,45 @@ def _make_patched_inject(turbo):
 
 
 _PATCHED = None
+_HOOKED = False
+
+
+def install_prompt_hook():
+    """Patch at the START of every prompt, before a single node runs.
+
+    Whether the turbo pack exists at our import time depends on nothing more
+    principled than the FOLDER NAME: ComfyUI imports custom_nodes in alphabetical
+    order. This pack used to sort after ComfyUI-MiniMax-H3-Turbo and patched it at
+    import; renaming to ComfyUI-H3Studio moved it in front, so the patch slipped to
+    execute time -- by which point the turbo LoRA node had already built its closure
+    around the UNPATCHED function, and sampling died with
+
+        RuntimeError: The size of tensor a (4) must match the size of tensor b (2)
+
+    because its adaln row table was two rows short of the model's t_emb. Hooking
+    prompt start makes the order irrelevant: the LoRA node cannot have run yet.
+    """
+    global _HOOKED
+    if _HOOKED:
+        return True
+    try:
+        import execution
+    except Exception:
+        return False          # headless import, or core moved: retries still cover us
+    ex = getattr(execution, "PromptExecutor", None)
+    orig = getattr(ex, "execute_async", None) if ex is not None else None
+    if orig is None or getattr(orig, "_h3studio_hook", False):
+        _HOOKED = orig is not None
+        return _HOOKED
+
+    async def execute_async(self, *args, **kwargs):
+        install(at_import=True)   # nothing has executed yet, so never "late"
+        return await orig(self, *args, **kwargs)
+
+    execute_async._h3studio_hook = True
+    ex.execute_async = execute_async
+    _HOOKED = True
+    return True
 
 
 def install(at_import=False):
@@ -181,7 +220,12 @@ def install(at_import=False):
     # the sys.modules scan is cheap, so verify the live module every call
     turbo = _find_turbo()
     if turbo is None:
-        return False  # turbo pack not installed; nothing to do
+        # Not loaded YET, or not installed at all -- we cannot tell them apart
+        # from here, and the answer depends on folder ordering. Arrange to try
+        # again before the next prompt runs, which is early enough to matter.
+        if at_import:
+            install_prompt_hook()
+        return False
     if getattr(turbo._inject_adaln_egrid, "_guide_compat", False):
         _PATCHED = turbo
         return True
