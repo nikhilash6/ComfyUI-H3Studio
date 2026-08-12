@@ -190,6 +190,13 @@ header shows a live cost meter.
 | **H3 Basic Scheduler (wired denoise)** | Core's scheduler with denoise as a socket, so v2v_denoise drives it. Its `rescale` mode also fixes core's dead zone at high denoise |
 | **MiniMax H3 Temporal LoRA Blend** | Different LoRA weights before and after a moment inside the clip |
 
+> **Temporal LoRA Blend needs testing.** It is the least exercised node here —
+> the maths is sound and it runs, but how it behaves across real LoRAs, boundary
+> positions and feather widths is barely mapped. If you try it, good result or
+> bad, please say so in the
+> [issues](https://github.com/shootthesound/ComfyUI-H3Studio/issues) — that
+> feedback is worth more than more theory.
+
 ## Honest limits
 
 - **Waypoints are out of distribution.** H3 was trained on first/last anchors
