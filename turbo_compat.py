@@ -104,16 +104,35 @@ def correct_unique_t(timestep, shift_v, shift_a, payload, transformer_options):
     # noise_aug), so the row VALUES must too, not just the counts (bug-hunt finding)
     vis = float(payload.get("visual_cond_noise_aug", _mmm.VISUAL_COND_TIMESTEP))
     aud = float(payload.get("audio_cond_noise_aug", _mmm.AUDIO_COND_TIMESTEP))
+    augs = payload.get("cond_video_noise_augs") or None
     s = {t_v, t_a}
-    if has_vis:
-        s.add(max(t_v, vis))
-        # per-row softened labels (h3_row_aug_patch): the E-grid interpolates at
-        # arbitrary t, and the patched _forward maps segments by the same sorted
-        # set -- so the turbo table only needs the extra values present
-        for a in (payload.get("cond_video_noise_augs") or ()):
-            s.add(max(t_v, float(a)))
-    if has_aud:
-        s.add(max(t_a, aud))
+    if layout is not None:
+        # Mirror h3_row_aug_patch's _seg_t_list EXACTLY: each visual cond segment
+        # contributes its own row label, falling back to max(t_v, vis) only when
+        # no label covers it. Adding max(t_v, vis) unconditionally (as this did)
+        # invents a timestep core never uses whenever EVERY cond row is softened
+        # -- e.g. motion_context_strength below 1.0 with no other keyframes --
+        # and turbo then builds an adaln table one row taller than the model's
+        # t_emb: "size of tensor a (3) must match tensor b (4)".
+        vc = 0
+        for _a, _b, kind in layout.segments:
+            if kind in ("cond", "ref_img"):
+                if augs is not None and vc < len(augs):
+                    s.add(max(t_v, float(augs[vc])))
+                else:
+                    s.add(max(t_v, vis))
+                vc += 1
+            elif kind == "ref_audio":
+                s.add(max(t_a, aud))
+    else:
+        # no prebuilt layout: the DiT rebuilds one, and the patched _forward
+        # falls back to the same coarse form
+        if has_vis:
+            s.add(max(t_v, vis))
+            for a in (augs or ()):
+                s.add(max(t_v, float(a)))
+        if has_aud:
+            s.add(max(t_a, aud))
     return sorted(s)
 
 
