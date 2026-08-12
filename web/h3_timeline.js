@@ -2810,6 +2810,7 @@ function attachTimeline(node) {
         state.fs = null;
         window.removeEventListener("keydown", f.onKey, true);
         for (const [ev, fn] of f.apiEvents || []) api.removeEventListener(ev, fn);
+        f.stopAudio?.();      // detached <audio>: out of stopVideosIn's reach
         stopVideosIn(f.root, true);
         f.root.remove();
         renderSummary();
@@ -7759,7 +7760,19 @@ function attachTimeline(node) {
         ro?.observe(main);
         root.appendChild(resPanel);   // render results dock over the editor
         document.body.appendChild(root);
-        state.fs = { root, onKey, fill, renderTrack, renderReel, renderSfx, ro, apiEvents };
+        // Detached <audio> elements are NOT inside root, so closeFullscreen's
+        // stopVideosIn() can't reach them — closing the editor would leave the
+        // soundtrack (or an audition) playing on over a dead UI.
+        const stopAudio = () => {
+            stopDockMusic();
+            stopGuidePrev();
+            if (sfxPrev) {
+                try { sfxPrev.pause(); } catch (e) { /* gone */ }
+                sfxPrev = null;
+            }
+        };
+        state.fs = { root, onKey, fill, renderTrack, renderReel, renderSfx, ro,
+            apiEvents, stopAudio };
         fill();
     }
     node._h3OpenFS = openFullscreen;
