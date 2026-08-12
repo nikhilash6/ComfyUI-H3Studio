@@ -354,7 +354,7 @@ const SETUP_DEFAULTS = {
     motion_context_frames: 22, motion_context_audio_frames: 22,
     v2v_noise: 0.0, v2v_noise_declare: 1.0,
     motion_context_reuse_latent: true, motion_context_anchor_brightness: false,
-    motion_context_strength: 1.0,
+    motion_context_strength: 0.92,
     mask_ref_pixels: false,
 };
 
@@ -447,6 +447,14 @@ const HELP_COPY = [
 
 const RES_KEY = "h3guide.lastRes";
 const LOCK_KEY = "h3guide.aspectLock";
+
+// Settings a workflow saved before they existed should adopt rather than
+// inherit whatever a positional restore left behind. Keyed on absence from the
+// name-map armor, so a value you actually chose is never overwritten.
+const MIGRATE_DEFAULTS = {
+    motion_context_reuse_latent: true,     // skips the VAE round trip per link
+    motion_context_strength: 0.92,         // measured to stop artifacts compounding
+};
 
 function attachTimeline(node) {
     // last-used canvas res survives across sessions: a fresh node starts on it.
@@ -6947,12 +6955,13 @@ function attachTimeline(node) {
                 if (document.activeElement !== mcReuseCb)
                     mcReuseCb.checked = !!widgetValue(node, "motion_context_reuse_latent", true);
                 if (document.activeElement !== mcStr) {
-                    const sv = Number(widgetValue(node, "motion_context_strength", 1.0));
-                    mcStr.value = (isFinite(sv) ? sv : 1.0).toFixed(2);
+                    const sv = Number(widgetValue(node, "motion_context_strength", 0.92));
+                    mcStr.value = (isFinite(sv) ? sv : 0.92).toFixed(2);
                 }
                 // a non-default strength matters enough to see at a glance
-                mcStr.style.color = Number(widgetValue(node, "motion_context_strength", 1.0)) < 1.0
-                    ? COL.green : COL.bright;
+                // 1.0 is the risky value now (artifacts compound), so flag THAT
+                mcStr.style.color = Number(widgetValue(node, "motion_context_strength", 0.92)) >= 1.0
+                    ? COL.mid : COL.green;
                 mcNote.style.display = mf ? "" : "none";
                 mcThumb.style.display = mf ? "" : "none";
                 if (mf) {
@@ -7558,8 +7567,24 @@ app.registerExtension({
             const r = onConfigure?.apply(this, arguments);
             try {
                 const m = this.properties?.h3_widget_values;
-                if (m) for (const w of this.widgets || [])
-                    if (w.name in m) w.value = m[w.name];
+                if (m) {
+                    for (const w of this.widgets || [])
+                        if (w.name in m) w.value = m[w.name];
+                    // A workflow saved before a widget existed has no entry for
+                    // it, and positional restore can leave a boolean sitting on
+                    // false — which is how latent reuse ended up silently off
+                    // for a whole chain. Absent from the map means "never chosen",
+                    // so apply today's default rather than whatever landed there.
+                    for (const [k, v] of Object.entries(MIGRATE_DEFAULTS)) {
+                        if (k in m) continue;
+                        const w = (this.widgets || []).find((x) => x.name === k);
+                        if (w && w.value !== v) {
+                            w.value = v;
+                            console.log("[h3guide] applied current default for " + k
+                                + " (this workflow predates it):", v);
+                        }
+                    }
+                }
             } catch (e) { /* positional restore stands */ }
             requestAnimationFrame(() => this._h3Refresh?.());
             return r;
