@@ -3855,7 +3855,9 @@ function attachTimeline(node) {
         mcStr.title = "how hard the pinned frames are enforced. 1.0 copies them exactly — seamless, but artifacts in the pinned tail get copied too and compound down a chain. 0.90–0.95 makes the model REGENERATE that region guided by the previous clip instead of duplicating it: motion and framing carry over, accumulated blockiness doesn't.";
         mcStr.addEventListener("blur", () => {
             const v = Math.max(0, Math.min(1, parseFloat(mcStr.value)));
-            setWidget("motion_context_strength", isFinite(v) ? Math.round(v * 20) / 20 : 1.0);
+            // 0.01 steps: the useful band here is narrow (0.90-0.95), so
+            // snapping to 0.05 threw away most of the resolution that matters
+            setWidget("motion_context_strength", isFinite(v) ? Math.round(v * 100) / 100 : 1.0);
             fill();
         });
         const mcReuse = el("label", { display: "flex", gap: "4px", alignItems: "center",
