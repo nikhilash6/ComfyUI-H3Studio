@@ -5573,7 +5573,8 @@ function attachTimeline(node) {
         trkRow.append(trkLane, trkVol, trkPct,
             el("span", { color: COL.text, fontSize: "10px" }, "fade"), trkFi,
             el("span", { color: COL.text, fontSize: "10px" }, "/"), trkFo);
-        sfxWrap.appendChild(trkRow);
+        // NB: the row is appended below, once sfxWrap exists — appending here
+        // reads sfxWrap before its const and throws, taking the overlay with it
 
         function renderSoundtrackLane() {
             const g = node.properties?.h3_guide || {};
@@ -5605,6 +5606,7 @@ function attachTimeline(node) {
             display: "none", flexDirection: "column", gap: "4px",
             padding: "4px 16px 10px", flex: "0 0 auto",
         });
+        sfxWrap.appendChild(trkRow);   // ♪ soundtrack sits above the fx lanes
         // Two-click confirms on reel CARDS have to live outside the button:
         // fill() calls renderReel(), which rebuilds every card, so a flag
         // stored on the element was wiped by any refresh (a thumbnail
