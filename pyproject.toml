@@ -1,0 +1,20 @@
+[project]
+name = "comfyui-h3studio"
+version = "1.0.0"
+description = "A video editor for MiniMax H3 inside a single ComfyUI node. Keyframes with independent strength dials (guide the motion instead of pinning it), waypoints the clip passes through, and a fullscreen timeline editor with filmstrip cards, framing tool, cast members that persist across clips, and free Creative-Commons image/audio search built in. Continue a clip with real continuity: the previous render's tail frames AND audio are pinned at the new head, so motion and the actual waveform carry through the join — with an auto mode that chains clips hands-free. Finished clips land on a reel you can trim, crossfade, level, score with a soundtrack lane plus three fx lanes, and export as one video. Also includes v2v restyling, soft denoise zones (differential diffusion with per-frame masks), regional prompting, a temporal LoRA blend, and a Zoom & Pan image loader."
+license = { text = "MIT" }
+authors = [
+    { name = "Peter Neill" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.urls]
+Homepage = "https://github.com/shootthesound/ComfyUI-H3Studio"
+Repository = "https://github.com/shootthesound/ComfyUI-H3Studio"
+Issues = "https://github.com/shootthesound/ComfyUI-H3Studio/issues"
+
+[tool.comfy]
+PublisherId = "shootthesound"
+DisplayName = "H3 Studio"
+Icon = "https://avatars.githubusercontent.com/u/110498357?v=4"
