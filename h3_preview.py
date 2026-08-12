@@ -102,6 +102,15 @@ def register():
                         files.append((e.stat().st_mtime, rp))
         return dirs, files
 
+    @routes.post("/h3guide/reset_anchor")
+    async def h3guide_reset_anchor(request):
+        """Forget the chain's brightness anchor — the editor calls this when a
+        reel is emptied or a chain starts fresh, so the next link re-anchors
+        instead of dragging the old sequence's level into a new scene."""
+        from . import h3_latent_cache
+        h3_latent_cache.anchor_set(None, "reel cleared")
+        return web.json_response({"ok": True})
+
     @routes.get("/h3guide/extract_frame")
     async def h3guide_extract_frame(request):
         """A clip's frame as a PNG, decoded by the SAME PyAV path the render

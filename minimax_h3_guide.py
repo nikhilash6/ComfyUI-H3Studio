@@ -143,6 +143,7 @@ REF_IMAGE_SHORT_EDGE = 2048
 MC_FRAME_PER_TOKEN = (1, 4, 4, 4, 4)  # pixel frames covered by latent step k%5
 MC_VIDEO_RUN_GRID = (39, 22, 5, 1)    # run lengths the video VAE distinguishes
 MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
+MC_ANCHOR_CLAMP = 0.08    # max brightness nudge per link (0-1 RGB scale)
 
 
 def mc_step_offsets(latent_t):
@@ -755,6 +756,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="How much of v2v_noise is DECLARED to the sampler through the v2v_denoise output (the sigma dial).\n\n1.0 (default, safe): the emitted denoise is raised so the schedule starts where the latent actually is -- clean output, and the net effect is like a higher denoise except the source structure is genuinely gone rather than merely diluted.\n\nBelow 1.0: the sampler is told the latent is cleaner than it really is, so it commits fewer/gentler steps over already-scrambled content -- the furthest you can get from the source, at the cost of grain if you push it (undeclared noise has to land somewhere).\n\nNeeds the v2v_denoise output wired to H3 Basic Scheduler, and does nothing unless v2v_noise is above 0."),
                 io.Boolean.Input("motion_context_reuse_latent", default=True,
                     tooltip="When the clip you're continuing is a render THIS SESSION just made, pin its latent directly instead of decoding the file and re-encoding it. That removes a whole VAE round trip per link -- the loss that compounds and softens a long chain -- and pins the model's own output rather than a lossy copy of it. Falls back to re-encoding automatically, with the reason in the log, whenever the cached latent isn't the right clip, canvas or cut point. Only the tail is held in memory (a few MB). Turn off to force the file path."),
+                io.Boolean.Input("motion_context_anchor_brightness", default=False,
+                    tooltip="EXPERIMENTAL, off by default. Stops a chain's brightness drifting, by correcting the CONDITIONING instead of the finished pixels.\n\nThe pinned context is what the model matches, so before pinning it the node measures what the previous render actually came out at (read straight from its latent -- no decode) and nudges the context by the error against the chain's anchor, taken from its first link. Nothing assumes how much a link drifts: 0.5% drift gets a 0.5% correction, 4% gets 4%, and if the model only partly follows the nudge the residue is corrected next link -- it converges instead of accumulating.\n\nCosts nothing (an add on a tensor already in memory), never touches finished pixels (so no clipped highlights and no clip paying for the ones before it), and it fixes the render FILES, not just the export. Clamped to +-0.08 so a deliberate lighting change isn't fought. Needs motion_context_reuse_latent; clear the reel to re-anchor.\n\nWhile it's off, nothing about the render changes."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -860,6 +863,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 motion_context_frames=22, motion_context_audio_frames=22,
                 v2v_noise=0.0, v2v_noise_declare=1.0,
                 motion_context_reuse_latent=True,
+                motion_context_anchor_brightness=False,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -1087,8 +1091,38 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
             if mc_cached is not None:
                 entry, (blocks, offsets, span) = mc_cached
                 dev = comfy.model_management.intermediate_device()
+                # Brightness anchoring (optional): the pinned context is what
+                # the model matches, so correcting IT keeps the chain level --
+                # no gain on finished pixels, no VAE, and no assumption about
+                # how much any given link drifts. Closed loop: measure what the
+                # last render actually came out at, push the error into the
+                # context we hand over. A partly-followed nudge just means a
+                # slightly larger correction next link, so it converges instead
+                # of accumulating.
+                mc_shift = 0.0
+                if motion_context_anchor_brightness:
+                    a = h3_latent_cache.anchor_get()
+                    r = entry.get("luma")
+                    if r is not None and a is None:
+                        h3_latent_cache.anchor_set(r, "first link of this chain")
+                    elif r is not None:
+                        err = a - r
+                        lim = float(MC_ANCHOR_CLAMP)
+                        mc_shift = max(-lim, min(lim, err))
+                        if abs(err) > lim:
+                            logging.info("MiniMaxH3Guide: brightness error %.4f "
+                                         "exceeds the +-%.2f clamp — correcting "
+                                         "what's safe; a real lighting change "
+                                         "will simply re-anchor if you clear the "
+                                         "reel.", err, lim)
+                        if abs(mc_shift) > 1e-4:
+                            logging.info("MiniMaxH3Guide: brightness anchor — last "
+                                         "render sat at %.4f vs anchor %.4f, "
+                                         "nudging the pinned context %+.4f.",
+                                         r, a, mc_shift)
                 mc_keyframes = [{"resolved_frame_index": offsets[k],
-                                 "latent": blocks[k].to(dev)}
+                                 "latent": h3_latent_cache.shift_latent_luma(
+                                     blocks[k], mc_shift).to(dev)}
                                 for k in range(len(blocks))]
                 mc_span = span
                 logging.info("MiniMaxH3Guide: motion context taken straight from "

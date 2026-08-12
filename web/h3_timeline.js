@@ -333,6 +333,7 @@ const SETUP_FIELDS = [
     "motion_context_file", "motion_context_end_seconds",
     "motion_context_frames", "motion_context_audio_frames",
     "v2v_noise", "v2v_noise_declare",
+    "motion_context_reuse_latent", "motion_context_anchor_brightness",
     "mask_ref_pixels",
 ];
 
@@ -351,6 +352,7 @@ const SETUP_DEFAULTS = {
     motion_context_file: "", motion_context_end_seconds: 0.0,
     motion_context_frames: 22, motion_context_audio_frames: 22,
     v2v_noise: 0.0, v2v_noise_declare: 1.0,
+    motion_context_reuse_latent: true, motion_context_anchor_brightness: false,
     mask_ref_pixels: false,
 };
 
@@ -1609,9 +1611,15 @@ function attachTimeline(node) {
             : { in: 0, out: 0, xfade: 0, ...e });
     }
     function reelSet(list) {
+        const had = (node.properties?.h3_reel || []).length;
         node.properties = node.properties || {};
         node.properties.h3_reel = list;
         state.fs?.renderReel?.();
+        // an emptied reel means a new sequence: drop the brightness anchor so
+        // the next chain levels itself rather than inheriting the old one
+        if (had && !list.length) {
+            api.fetchApi("/h3guide/reset_anchor", { method: "POST" }).catch(() => {});
+        }
     }
     function reelAdd(name) {
         const list = reelGet();

@@ -60,6 +60,21 @@ def arm():
                      "latent will be kept for the following continuation.")
 
 
+_anchor = None          # the chain's intended brightness (0-1), or None
+
+
+def anchor_get():
+    return _anchor
+
+
+def anchor_set(level, why=""):
+    global _anchor
+    _anchor = None if level is None else float(level)
+    logging.info("MiniMaxH3Guide: chain brightness anchor %s%s",
+                 "cleared" if level is None else "set to %.4f" % level,
+                 (" (%s)" % why) if why else "")
+
+
 def get():
     """The last captured latent, or None if there isn't a usable one."""
     if _last is None:
@@ -72,6 +87,63 @@ def get():
 def _frames_for(latent_t):
     from .minimax_h3_guide import mc_pixel_frames
     return mc_pixel_frames(int(latent_t))
+
+
+# ---- brightness in latent space -------------------------------------------
+# comfy ships a linear latent->RGB map for H3 previews (24x3, scale 1.0), which
+# lets us READ a latent's brightness without a decode and WRITE a shift into it
+# without a re-encode. Measured conditioning: a 2% fix on a mid-grey clip is a
+# latent delta of norm ~0.015 against a latent whose own std is ~1.0.
+_LUMA = None            # (unit_delta[24], rgb_matrix[24,3]) or False if absent
+
+
+def _luma_basis():
+    """(unit, M): `unit` is the minimum-norm latent delta whose predicted RGB
+    shift is exactly +1.0 on all three channels (so scaling it by d shifts
+    brightness by d, neutrally). False when the map is unavailable."""
+    global _LUMA
+    if _LUMA is not None:
+        return _LUMA
+    try:
+        import comfy.latent_formats as lf
+        M = torch.tensor(lf.MiniMaxH3AV().latent_rgb_factors, dtype=torch.float32)
+        if M.ndim != 2 or M.shape[0] != 24 or M.shape[1] != 3:
+            raise ValueError("unexpected shape %s" % (tuple(M.shape),))
+        # least-norm v with v @ M == [1,1,1]: neutral, so no colour cast
+        target = torch.ones(3, dtype=torch.float32)
+        unit = torch.linalg.lstsq(M.T, target).solution     # [24]
+        got = unit @ M
+        if not torch.allclose(got, target, atol=1e-3):
+            raise ValueError("solve missed the target: %s" % got.tolist())
+        _LUMA = (unit, M)
+    except Exception as exc:
+        logging.warning("MiniMaxH3Guide: latent brightness map unavailable (%s); "
+                        "brightness anchoring disabled.", exc)
+        _LUMA = False
+    return _LUMA
+
+
+def latent_luma(video_lat):
+    """Predicted mean brightness (0-1 RGB scale) of a video latent."""
+    b = _luma_basis()
+    if not b:
+        return None
+    _, M = b
+    v = video_lat.to(torch.float32)
+    # mean over batch/time/space -> [24], then through the preview map
+    per_ch = v.mean(dim=(0, 2, 3, 4)) if v.ndim == 5 else v.mean(dim=(0, 2, 3))
+    return float((per_ch @ M).mean())
+
+
+def shift_latent_luma(video_lat, delta):
+    """Return the latent shifted so its predicted brightness moves by `delta`."""
+    b = _luma_basis()
+    if not b or abs(delta) < 1e-5:
+        return video_lat
+    unit, _ = b
+    d = unit.to(video_lat.device, video_lat.dtype) * float(delta)
+    shape = [1, -1] + [1] * (video_lat.ndim - 2)
+    return video_lat + d.view(shape)
 
 
 def install():
@@ -154,12 +226,16 @@ def _capture(out):
         "a_total": a_total,
         "a_kept": a_kept,
     }
+    # what this render actually came out at — the feedback term. Measured on
+    # the tail (the part a continuation pins), free, no decode.
+    _last["luma"] = latent_luma(_last["video"])
     logging.info("MiniMaxH3Guide: cached this render's tail latent — last %d of "
-                 "%d steps (%d-frame clip, %dx%d), %.1f MB. The next "
+                 "%d steps (%d-frame clip, %dx%d), %.1f MB, level %s. The next "
                  "continuation can skip the VAE.",
                  kept, t_total, frames, int(video.shape[-1]) * 16,
                  int(video.shape[-2]) * 16,
-                 (_last["video"].numel() * 4 + _last["audio"].numel() * 4) / 1e6)
+                 (_last["video"].numel() * 4 + _last["audio"].numel() * 4) / 1e6,
+                 "%.4f" % _last["luma"] if _last["luma"] is not None else "n/a")
 
 
 def matches(name, want_w, want_h):
