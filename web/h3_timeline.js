@@ -5155,7 +5155,9 @@ function attachTimeline(node) {
         const undoB = el("button", { ...btnStyle, color: COL.mid, display: "none" }, "↩ undo");
         undoB.title = "restore the just-removed clip, with its trims, crossfade and setup";
         let reelUndoInfo = null, reelUndoTimer = null;
+        let clearedReel = null, clearTimer = null;
         const stashRemoved = (entry, idx) => {
+            clearedReel = null;          // a single removal supersedes a clear
             reelUndoInfo = { entry, idx };
             undoB.style.display = "";
             clearTimeout(reelUndoTimer);
@@ -5165,6 +5167,14 @@ function attachTimeline(node) {
             }, 12000);
         };
         undoB.addEventListener("click", () => {
+            if (clearedReel) {                     // a whole-reel clear wins
+                reelSet(clearedReel);
+                toast(`reel restored — ${clearedReel.length} clip(s)`);
+                clearedReel = null;
+                clearTimeout(clearTimer);
+                undoB.style.display = "none";
+                return;
+            }
             if (!reelUndoInfo) return;
             const l = reelGet();
             const at = Math.min(reelUndoInfo.idx, l.length);
@@ -5174,6 +5184,39 @@ function attachTimeline(node) {
             clearTimeout(reelUndoTimer);
             reelUndoInfo = null;
             toast(`clip restored at position ${at + 1}`);
+        });
+        // clearing is the one action that loses several clips' worth of
+        // trims/crossfades at once, so it asks twice and is fully undoable
+        const clearB = el("button", { ...btnStyle, color: COL.red }, "✕ clear reel");
+        clearB.title = "empty the chain (the files stay on disk). Asks twice, and ↩ undo brings the whole reel back — including every trim, crossfade and stored setup.";
+        clearB.addEventListener("click", () => {
+            const list = reelGet();
+            if (!list.length) return;
+            if (clearB.dataset.confirm !== "1") {
+                clearB.dataset.confirm = "1";
+                clearB.textContent = `⚠ clear all ${list.length}?`;
+                clearTimer = setTimeout(() => {
+                    delete clearB.dataset.confirm;
+                    clearB.textContent = "✕ clear reel";
+                }, 2500);
+                return;
+            }
+            clearTimeout(clearTimer);
+            delete clearB.dataset.confirm;
+            clearB.textContent = "✕ clear reel";
+            clearedReel = list;
+            reelUndoInfo = null;          // the clear supersedes a single removal
+            undoB.style.display = "";
+            clearTimeout(reelUndoTimer);
+            clearTimeout(clearTimer);
+            // a whole reel is a bigger loss than one card, so it stays undoable
+            // for longer
+            clearTimer = setTimeout(() => {
+                undoB.style.display = "none";
+                clearedReel = null;
+            }, 45000);
+            reelSet([]);      // also resets the brightness anchor for a new chain
+            toast(`reel cleared (${list.length} clip(s)) — ↩ undo restores it, trims and all`);
         });
         const rerollB = el("button", btnStyle, "🎲 re-roll last");
         rerollB.title = "drop the newest clip from the chain and queue again — the replacement will take its place (↩ undo can bring the dropped one back)";
@@ -5309,7 +5352,7 @@ function attachTimeline(node) {
         reelCtl.append(undoB, playReelB, musicLab, musicF, musicFadeLab, musicFiF, musicFoF,
             el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
-            reelAddB, rerollB, exportB);
+            reelAddB, rerollB, clearB, exportB);
         reelHead.appendChild(reelCtl);
         const reelRow = el("div", {
             display: "none", gap: "10px", padding: "8px 16px 14px", overflowX: "auto",
@@ -5330,6 +5373,15 @@ function attachTimeline(node) {
             display: "none", flexDirection: "column", gap: "4px",
             padding: "4px 16px 10px", flex: "0 0 auto",
         });
+        // Two-click confirms on reel CARDS have to live outside the button:
+        // fill() calls renderReel(), which rebuilds every card, so a flag
+        // stored on the element was wiped by any refresh (a thumbnail
+        // finishing, the toast itself) and the second click never landed —
+        // the button just said "click again" forever.
+        let cardArm = null;            // {kind, name, t}
+        const ARM_MS = 5000;
+        const armOk = (kind, name) => !!cardArm && cardArm.kind === kind
+            && cardArm.name === name && Date.now() - cardArm.t < ARM_MS;
         let sfxSel = null;   // {t, i}
         const sfxLanes = [];
         for (let t = 0; t < SFX_TRACKS; t++) {
@@ -5586,7 +5638,7 @@ function attachTimeline(node) {
                     reelRow.appendChild(joint);
                 }
                 const c = el("div", {
-                    width: "216px", flex: "0 0 auto", background: COL.panel,
+                    width: "260px", flex: "0 0 auto", background: COL.panel,
                     border: `1px solid ${COL.border}`, borderRadius: "6px",
                     overflow: "hidden",
                 });
@@ -5595,7 +5647,7 @@ function attachTimeline(node) {
                 const vv = el("video");
                 vv.muted = true; vv.preload = "metadata"; vv.controls = true;
                 vv.src = inputFileUrl(entry.name);
-                Object.assign(vv.style, { width: "216px", height: "121px",
+                Object.assign(vv.style, { width: "260px", height: "146px",
                     objectFit: "cover", background: "#222", display: "block" });
                 // preview honors the trim: playback loops inside [in, out]
                 vv.addEventListener("play", () => {
@@ -5637,8 +5689,8 @@ function attachTimeline(node) {
                 }, (i + 1) + ". " + nm));
                 const row = el("div", { display: "flex", gap: "4px", alignItems: "center" });
                 const mk = (label, title, fn, color) => {
-                    const b = el("button", { ...btnStyle, padding: "0 6px",
-                        fontSize: "11px", color: color || COL.bright }, label);
+                    const b = el("button", { ...btnStyle, padding: "3px 9px",
+                        fontSize: "13px", color: color || COL.bright }, label);
                     b.title = title;
                     b.addEventListener("click", fn);
                     return b;
@@ -5661,38 +5713,34 @@ function attachTimeline(node) {
                         COL.green),
                     mk("🎥", "add this clip as a reference video — its motion, look and sound condition the next render",
                         () => addFileVideo(entry.name), COL.green),
-                    mk("⚙", entry.setup
+                    mk(armOk("gear", entry.name) ? "⚙ sure?" : "⚙", entry.setup
                         ? "load this clip's full setup (prompt, refs, framings, strengths, context) back into the editor — tweak it and the render dock will offer to REPLACE this card with the new take"
                         : "no setup stored on this clip (it was rendered before setup memory existed)",
-                        (ev) => {
+                        () => {
                             if (!entry.setup) { toast("no setup stored on this clip — clips remember their setup from now on", true); return; }
-                            const b = ev.currentTarget;
-                            if (b.dataset.confirm !== "1") {
-                                b.dataset.confirm = "1";
-                                b.style.color = COL.mid;
-                                setTimeout(() => { delete b.dataset.confirm; b.style.color = COL.bright; }, 1800);
+                            if (!armOk("gear", entry.name)) {
+                                cardArm = { kind: "gear", name: entry.name, t: Date.now() };
+                                renderReel();
                                 toast(`click ⚙ again to load clip ${i + 1}'s setup — this replaces the current editor setup`);
                                 return;
                             }
-                            delete b.dataset.confirm;
+                            cardArm = null;
                             const missing = applySetupFields(entry.setup, true);   // clip recipe only
                             state.reelTarget = { idx: i, name: entry.name };
                             toast(`clip ${i + 1}'s setup loaded — tweak and ▶ queue; the render dock will offer to replace the card`
                                 + (missing.length ? ` (missing sockets: ${missing.join(", ")})` : ""),
                                 missing.length > 0);
                         },
-                        entry.setup ? COL.bright : "#555"),
-                    mk("✕", "remove from the chain (the file stays on disk) — asks twice; ↩ undo lives in the reel header", (ev) => {
-                        const b = ev.currentTarget;
-                        if (b.dataset.confirm !== "1") {
-                            b.dataset.confirm = "1";
-                            b.textContent = "⚠";
-                            setTimeout(() => {
-                                delete b.dataset.confirm;
-                                b.textContent = "✕";
-                            }, 1600);
+                        !entry.setup ? "#555"
+                            : (armOk("gear", entry.name) ? COL.mid : COL.bright)),
+                    mk(armOk("del", entry.name) ? "⚠" : "✕",
+                       "remove from the chain (the file stays on disk) — asks twice; ↩ undo lives in the reel header", () => {
+                        if (!armOk("del", entry.name)) {
+                            cardArm = { kind: "del", name: entry.name, t: Date.now() };
+                            renderReel();
                             return;
                         }
+                        cardArm = null;
                         const l = reelGet();
                         stashRemoved(l[i], i);
                         l.splice(i, 1);
