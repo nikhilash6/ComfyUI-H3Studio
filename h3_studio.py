@@ -58,7 +58,39 @@ try:
     from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP as _VIS_T
 except Exception:  # core moved the constant; 0.999 is its long-standing value
     _VIS_T = 0.999
-from .load_image_zoom_pan import crop_box
+
+
+def crop_box(src_w, src_h, out_w, out_h, zoom, center_x, center_y):
+    """Pixel box of aspect out_w:out_h, shrunk by `zoom`, centred and kept in bounds.
+
+    Returns (x0, y0, x1, y1) and the zoom at which the box stops covering the output
+    resolution (i.e. where real upscaling would begin).
+    """
+    aspect = out_w / out_h
+    # largest window of the target aspect that fits inside the source
+    if src_w / src_h > aspect:
+        base_w, base_h = src_h * aspect, float(src_h)
+    else:
+        base_w, base_h = float(src_w), src_w / aspect
+
+    lossless_zoom = min(base_w / out_w, base_h / out_h)
+
+    crop_w = base_w / zoom
+    crop_h = base_h / zoom
+    # floor jointly so extreme zoom on tiny sources can't break the aspect lock
+    k = max(1.0 / crop_w, 1.0 / crop_h, 1.0)
+    crop_w *= k
+    crop_h *= k
+    cx = min(max(center_x * src_w, crop_w / 2.0), src_w - crop_w / 2.0)
+    cy = min(max(center_y * src_h, crop_h / 2.0), src_h - crop_h / 2.0)
+
+    x0 = int(round(cx - crop_w / 2.0))
+    y0 = int(round(cy - crop_h / 2.0))
+    x1 = min(src_w, x0 + max(1, int(round(crop_w))))
+    y1 = min(src_h, y0 + max(1, int(round(crop_h))))
+    x0 = max(0, min(x0, x1 - 1))
+    y0 = max(0, min(y0, y1 - 1))
+    return (x0, y0, x1, y1), lossless_zoom
 
 FPS_HINT = 24  # for the "at N.N seconds" prompt labels only
 
@@ -1586,14 +1618,11 @@ class H3StudioImageToVideo(io.ComfyNode):
 
 class H3StudioExtension(ComfyExtension):
     async def get_node_list(self):
-        from .load_image_zoom_pan import LoadImageZoomPan
-        from .h3_v2v import H3VideoToLatent, H3FrameRange, H3Splice
         from .h3_temporal_lora import H3TemporalLoraBlend
         from .h3_v2v import H3BasicScheduler
         from .h3_diff_v2v import H3SoftDenoiseZone
         from .h3_regional import H3RegionalPrompt
-        return [H3StudioImageToVideo, LoadImageZoomPan,
-                H3VideoToLatent, H3FrameRange, H3Splice, H3TemporalLoraBlend,
+        return [H3StudioImageToVideo, H3TemporalLoraBlend,
                 H3BasicScheduler, H3SoftDenoiseZone, H3RegionalPrompt]
 
 

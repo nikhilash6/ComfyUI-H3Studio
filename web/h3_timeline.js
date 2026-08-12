@@ -227,9 +227,9 @@ function upstreamImage(node, inputName) {
     return img && img.naturalWidth > 0 ? img : null;
 }
 
-// crop window maths — MUST mirror crop_box() in load_image_zoom_pan.py (the
-// Python side applies these crops via that exact function; verified earlier
-// across 400 parameter combinations for the Zoom & Pan loader)
+// crop window maths — MUST mirror crop_box() in h3_studio.py (the Python side
+// applies these crops via that exact function; verified across 400 parameter
+// combinations back when it lived in the Zoom & Pan loader, now its own pack)
 function cropBoxJS(srcW, srcH, outW, outH, zoom, centerX, centerY) {
     const aspect = outW / outH;
     let baseW, baseH;

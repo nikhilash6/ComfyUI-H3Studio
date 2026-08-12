@@ -1,24 +1,15 @@
-"""Video-to-video and section-splice nodes for MiniMax H3.
+"""Video-to-video support for MiniMax H3.
 
-build_v2v_latent -- the shared encoder: footage (+ audio) -> the H3 AV latent.
-    Used by the H3VideoToLatent node AND by the Guide node's v2v inputs, so the
-    whole restyle flow is drivable from the timeline editor.
+build_v2v_latent   -- the encoder: footage (+ audio) -> the H3 AV latent. The
+    Guide node's own V2V row calls this, so the whole restyle flow is drivable
+    from the timeline editor.
 
-H3VideoToLatent  -- EXPERIMENTAL: encode existing footage (+ audio) into the H3
-    AV latent so a normal KSampler at denoise < 1.0 restyles it, img2img-style.
-    Not a trained H3 task: video restyling should behave like img2img does
-    everywhere, but the audio stream runs a shifted sigma schedule internally
-    and partial denoise across that dual schedule is untested territory.
+H3BasicScheduler   -- core's BasicScheduler with denoise as a SOCKET, so the
+    Guide node's v2v_denoise output can drive the restyle amount over a wire.
 
-H3FrameRange     -- slice a section (frames + sample-accurate audio) out of a
-    clip by seconds, for restyling just that section.
-
-H3Splice         -- bake a restyled section back into the untouched original at
-    pixel level: exact frame splice, sample-accurate audio with an optional
-    linear crossfade at both joins.
-
-Together with core's LoadVideo / GetVideoComponents / CreateVideo these make the
-"section restyle" recipe in the README.
+Restyling is EXPERIMENTAL, and not a trained H3 task: it should behave like
+img2img does everywhere, but the audio stream runs a shifted sigma schedule
+internally and partial denoise across that dual schedule is untested territory.
 """
 
 import logging
@@ -102,187 +93,6 @@ def build_v2v_latent(vae, audio_vae, images, audio=None, fps=24.0, megapixels=0.
 
     latent = {"samples": comfy.nested_tensor.NestedTensor((video, audio_lat))}
     return latent, n
-
-
-class H3VideoToLatent(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="H3VideoToLatent",
-            display_name="MiniMax H3 Video To Latent (v2v)",
-            category="model/latent/minimax",
-            is_experimental=True,
-            description="Encode existing footage into the H3 AV latent for video-to-video: sample it with denoise 0.3-0.7 to restyle while keeping the motion (1.0 ignores the source entirely). Frames are expected at 24fps; count trims to the model's 17k+5 grid; dimensions round to the 32px grid (cap them with megapixels -- raw 1080p is ~2x the trained area). EXPERIMENTAL -- v2v is not a trained H3 task, and the audio stream's behaviour under partial denoise is untested. Note: with KSamplerAdvanced use add_noise=enable, or use SamplerCustomAdvanced -- core's add_noise=disable path doesn't understand AV latents.",
-            inputs=[
-                io.Image.Input("images", tooltip="Source frames at 24fps (e.g. from Get Video Components or H3 Frame Range). At least 5 frames; the count trims down to the 17k+5 grid."),
-                io.Vae.Input("vae"),
-                io.Audio.Input("audio", optional=True,
-                    tooltip="The footage's soundtrack. Encoded into the audio stream so partial denoise restyles it alongside the video; omit for a silent/zeroed audio stream."),
-                io.Vae.Input("audio_vae", optional=True,
-                    tooltip="The MiniMax H3 audio VAE -- required only when audio is connected."),
-                io.Float.Input("fps", default=24.0, min=1.0, max=120.0, step=1.0,
-                    tooltip="The footage's real frame rate (wire Get Video Components' fps output). H3 renders at 24fps, so non-24 footage plays retimed -- this input keeps the AUDIO aligned to the frames either way."),
-                io.Float.Input("megapixels", default=1.0, min=0.0, max=4.0, step=0.05,
-                    tooltip="Cap the encoded frame area (aspect-preserving, down-only, 32px grid). Default 1.0 MP ~= the trained 768x1344 area; 0 = keep the source resolution (raw 1080p is ~2x trained and slow)."),
-            ],
-            outputs=[io.Latent.Output(),
-                     io.Int.Output(display_name="frame_count")],
-        )
-
-    @classmethod
-    def execute(cls, images, vae, audio=None, audio_vae=None, fps=24.0,
-                megapixels=1.0) -> io.NodeOutput:
-        latent, n = build_v2v_latent(vae, audio_vae, images, audio, fps, megapixels,
-                                     "Video To Latent input")
-        return io.NodeOutput(latent, n)
-
-
-class H3FrameRange(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="H3FrameRange",
-            display_name="MiniMax H3 Frame Range",
-            category="image/video",
-            description="Cut a section (frames + sample-accurate audio) out of a clip by seconds -- the front half of the section-restyle recipe. Feed the section to H3 Video To Latent, restyle it, then bake it back with H3 Splice.",
-            inputs=[
-                io.Image.Input("images"),
-                io.Float.Input("start_seconds", default=0.0, min=0.0, max=10000.0, step=0.1),
-                io.Float.Input("end_seconds", default=0.0, min=0.0, max=10000.0, step=0.1,
-                    tooltip="0 = to the end of the clip."),
-                io.Float.Input("fps", default=24.0, min=1.0, max=120.0, step=1.0,
-                    tooltip="The clip's frame rate (H3 renders at 24; wire Get Video Components' fps for other footage)."),
-                io.Audio.Input("audio", optional=True),
-            ],
-            outputs=[io.Image.Output(display_name="images"),
-                     io.Audio.Output(display_name="audio"),
-                     io.Int.Output(display_name="start_frame"),
-                     io.Int.Output(display_name="frame_count")],
-        )
-
-    @classmethod
-    def execute(cls, images, start_seconds, end_seconds, fps, audio=None) -> io.NodeOutput:
-        total = images.shape[0]
-        s = max(0, min(total, int(round(start_seconds * fps))))
-        e = total if end_seconds <= 0 else max(0, min(total, int(round(end_seconds * fps))))
-        if e <= s:
-            raise ValueError("MiniMax H3 Frame Range: empty range -- start %.2fs (frame %d) "
-                             "to end %.2fs (frame %d) of a %d-frame clip."
-                             % (start_seconds, s, end_seconds, e, total))
-        out_images = images[s:e]
-
-        if audio is not None:
-            wf = audio["waveform"]
-            sr = audio["sample_rate"]
-            a0 = int(round(s / fps * sr))
-            a1 = int(round(e / fps * sr))
-            sl = wf[..., a0:a1]
-            want = a1 - a0
-            if sl.shape[-1] < want:
-                # soundtrack shorter than the video is a normal container state --
-                # zero-pad so downstream encode never sees an empty/short slice
-                pad = torch.zeros(*sl.shape[:-1], want - sl.shape[-1],
-                                  dtype=wf.dtype, device=wf.device)
-                sl = torch.cat([sl, pad], dim=-1)
-                logging.info("H3Studio range: audio ends %.2fs before the section "
-                             "does -- zero-padded.", (want - sl.shape[-1]) / sr)
-            out_audio = {"waveform": sl, "sample_rate": sr}
-        else:
-            out_audio = {"waveform": torch.zeros(1, 2, max(1, int(round((e - s) / fps * 44100)))),
-                         "sample_rate": 44100}
-        return io.NodeOutput(out_images, out_audio, s, e - s)
-
-
-class H3Splice(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="H3Splice",
-            display_name="MiniMax H3 Splice",
-            category="image/video",
-            description="Bake a (restyled) section back into the untouched original: exact frame replacement starting at start_seconds, sample-accurate audio with a linear crossfade at both joins. The back half of the section-restyle recipe.",
-            inputs=[
-                io.Image.Input("original_images"),
-                io.Image.Input("section_images"),
-                io.Float.Input("start_seconds", default=0.0, min=0.0, max=10000.0, step=0.1,
-                    tooltip="Where the section starts in the original (use H3 Frame Range's start_frame / fps)."),
-                io.Float.Input("fps", default=24.0, min=1.0, max=120.0, step=1.0),
-                io.Audio.Input("original_audio", optional=True),
-                io.Audio.Input("section_audio", optional=True),
-                io.Int.Input("audio_crossfade_ms", default=30, min=0, max=1000, step=5,
-                    tooltip="Linear crossfade at both audio joins to hide clicks. 0 = hard cut (and a bit-exact round-trip for an unmodified section)."),
-            ],
-            outputs=[io.Image.Output(display_name="images"),
-                     io.Audio.Output(display_name="audio")],
-        )
-
-    @classmethod
-    def execute(cls, original_images, section_images, start_seconds, fps,
-                original_audio=None, section_audio=None,
-                audio_crossfade_ms=30) -> io.NodeOutput:
-        # alpha is meaningless post-splice; comparing RGB-only also stops a
-        # channel mismatch masquerading as a "resize to match" error
-        original_images = original_images[..., :3]
-        section_images = section_images[..., :3]
-        total = original_images.shape[0]
-        s = max(0, min(total, int(round(start_seconds * fps))))
-        seg = section_images
-        if s + seg.shape[0] > total:
-            keep = max(0, total - s)
-            logging.warning("H3Studio splice: section overruns the original by %d "
-                            "frame(s) -- trimming the section to fit.",
-                            seg.shape[0] - keep)
-            seg = seg[:keep]
-        if seg.shape[0] == 0:
-            raise ValueError("MiniMax H3 Splice: start_seconds %.2f puts the whole section "
-                             "past the end of a %d-frame original." % (start_seconds, total))
-        if seg.shape[1:3] != original_images.shape[1:3]:
-            raise ValueError("MiniMax H3 Splice: section frames are %dx%d but the original "
-                             "is %dx%d -- resize the section to match before splicing."
-                             % (seg.shape[2], seg.shape[1],
-                                original_images.shape[2], original_images.shape[1]))
-        images = torch.cat([original_images[:s], seg, original_images[s + seg.shape[0]:]], dim=0)
-
-        audio = original_audio
-        if original_audio is not None and section_audio is not None:
-            wf = original_audio["waveform"].clone()
-            sr = original_audio["sample_rate"]
-            sw = section_audio["waveform"]
-            if section_audio["sample_rate"] != sr:
-                import torchaudio
-                sw = torchaudio.functional.resample(sw, section_audio["sample_rate"], sr)
-            sw = sw.to(wf.device)
-            a0 = int(round(s / fps * sr))
-            a_len = min(sw.shape[-1], max(0, wf.shape[-1] - a0))
-            sw = sw[..., :a_len]
-            if sw.shape[-2] != wf.shape[-2]:
-                sw = sw.mean(dim=-2, keepdim=True).expand(*sw.shape[:-2], wf.shape[-2], sw.shape[-1]).contiguous()
-            xf = min(int(sr * audio_crossfade_ms / 1000), a_len // 2)
-            wf[..., a0:a0 + a_len] = sw
-            if xf > 0:
-                ramp = torch.linspace(0.0, 1.0, xf, dtype=wf.dtype, device=wf.device)
-                orig = original_audio["waveform"].to(wf.device)
-                # no join to hide at a clip edge -- fading there would just bleed
-                # the old soundtrack over the restyled audio's attack
-                if a0 > 0:
-                    wf[..., a0:a0 + xf] = (sw[..., :xf] * ramp
-                                           + orig[..., a0:a0 + xf] * (1.0 - ramp))
-                e0 = a0 + a_len - xf
-                if a0 + a_len < wf.shape[-1]:
-                    wf[..., e0:e0 + xf] = (sw[..., a_len - xf:] * (1.0 - ramp)
-                                           + orig[..., e0:e0 + xf] * ramp)
-            audio = {"waveform": wf, "sample_rate": sr}
-        elif section_audio is not None:
-            logging.warning("H3Studio splice: section audio given without "
-                            "original_audio -- passing the section audio through unspliced.")
-            audio = section_audio
-        elif original_audio is not None:
-            logging.warning("H3Studio splice: no section audio -- the original "
-                            "soundtrack is kept over the restyled section.")
-        else:
-            audio = {"waveform": torch.zeros(1, 2, max(1, int(round(images.shape[0] / fps * 44100)))),
-                     "sample_rate": 44100}
-        return io.NodeOutput(images, audio)
 
 
 class H3BasicScheduler(io.ComfyNode):
