@@ -613,7 +613,12 @@ function attachTimeline(node) {
                     const t = w * 0.01;
                     if (flux[w] > thr && flux[w] >= flux[w - 1] && flux[w] >= flux[w + 1]
                         && t - last > 0.12) {
-                        onsets.push(t);
+                        // quantise to a frame boundary: a waypoint or beat can
+                        // only exist ON a frame, so an unquantised hit would sit
+                        // up to half a frame from where anything can be placed —
+                        // snapping then looked broken because the marker landed
+                        // visibly beside the tick
+                        onsets.push(Math.round(t * FPS) / FPS);
                         last = t;
                     }
                 }
@@ -4837,13 +4842,48 @@ function attachTimeline(node) {
             fill();
             renderTrack();
         };
-        trackCtl.appendChild(el("span", { fontSize: "11px", color: COL.text }, "♪ guide"));
+        trackCtl.appendChild(el("span", { fontSize: "11px", color: COL.text }, "♪ music"));
         const guideB = el("button", { ...btnStyle, padding: "1px 8px", fontSize: "11px" }, "pick…");
-        guideB.title = "lay an audio file under the timeline as a TIMING GUIDE — waveform + detected hits drawn on the beat lane, so waypoints and beats land on the music. Upload, input folder, mic or free web search. Display-only: it does not condition the render (→ ref does that).";
+        guideB.title = "lay a piece of MUSIC under the timeline: its waveform and detected hits (the green ticks) are drawn on the lane, so waypoints and text beats can be placed on the music. Upload, input folder, mic, or the free web search. What it DOES with the music is the 'use' dropdown next to it.";
         guideB.addEventListener("click", () => openAudioPicker((n) => {
             state.guideAudio = null;   // new file: decode fresh
+            const g0 = node.properties?.h3_guide || {};
             guideSet({ name: n });
+            // picking music with a use already chosen should honour it
+            if (g0.use === "track" || g0.use === "both") guideApplyUse(g0.use, n);
         }));
+        // audition the music under this clip, from wherever the window starts
+        let guidePrev = null;
+        const guidePlayB = el("button", { ...btnStyle, padding: "1px 8px", fontSize: "11px" }, "▶");
+        guidePlayB.title = "hear the music under this clip — plays the exact window the timeline is showing, so you can check your waypoints land where you think";
+        const stopGuidePrev = () => {
+            if (!guidePrev) return;
+            try { guidePrev.pause(); guidePrev.removeAttribute("src"); guidePrev.load(); }
+            catch (e) { /* gone */ }
+            guidePrev = null;
+            guidePlayB.textContent = "▶";
+            guidePlayB.style.color = COL.bright;
+        };
+        guidePlayB.addEventListener("click", () => {
+            if (guidePrev) { stopGuidePrev(); return; }
+            const g = node.properties?.h3_guide || {};
+            if (!g.name) return;
+            const off = guideOffset();
+            if (off == null) { toast("still reading the reel's clip durations…", true); return; }
+            guidePrev = document.createElement("audio");
+            guidePrev.src = inputFileUrl(g.name);
+            guidePrev.volume = Math.min(1, Number(g.level) || 0.8);
+            const stopAt = off + fc() / FPS;
+            guidePrev.addEventListener("loadedmetadata",
+                () => { if (guidePrev) guidePrev.currentTime = off; }, { once: true });
+            guidePrev.addEventListener("timeupdate", () => {
+                if (guidePrev && guidePrev.currentTime >= stopAt) stopGuidePrev();
+            });
+            guidePrev.addEventListener("ended", stopGuidePrev);
+            guidePrev.play().catch(() => {});
+            guidePlayB.textContent = "⏸";
+            guidePlayB.style.color = COL.green;
+        });
         const guideOffLab = el("span", { fontSize: "11px", color: COL.text }, "at");
         const guideOff = dimField(46);
         guideOff.title = "where in the song this clip starts, in seconds (typing here turns 'follow reel' off)";
@@ -4862,25 +4902,68 @@ function attachTimeline(node) {
             return { wrapEl, cb };
         };
         const gFollow = mkCheck("follow reel", "offset follows the reel's summed kept duration — the timeline always shows the NEXT clip's slice of the song", "follow");
-        const gSnap = mkCheck("snap ♪", "dragging waypoints/beats (and clicking the beat lane) snaps to the nearest detected hit", "snap");
-        const guideRefB = el("button", { ...btnStyle, padding: "1px 8px", fontSize: "11px" }, "→ ref");
-        guideRefB.title = "ALSO send this file to reference audio, so the model matches its character (whole file; the model imitates, it doesn't play it back)";
-        guideRefB.addEventListener("click", () => {
+        const gSnap = mkCheck("snap ♪", "dragging a waypoint or a TEXT BEAT (and clicking the lane to add one) snaps to the nearest musical hit — the green ticks. Hits are quantised to frame boundaries, so a snapped marker sits exactly on its tick rather than a few pixels beside it.", "snap");
+        // what the music is FOR. Timing only, in the finished video, fed to the
+        // model, or a combination — previously a one-way "→ ref" button that
+        // couldn't say "put this in the export".
+        const GUIDE_USES = [["guide", "timing only"], ["track", "soundtrack"],
+                            ["ref", "model reference"], ["both", "soundtrack + ref"]];
+        const guideUse = el("select", {
+            background: COL.input, color: COL.bright, border: `1px solid ${COL.border}`,
+            borderRadius: "3px", fontSize: "11px", padding: "1px 3px", cursor: "pointer",
+        });
+        guideUse.title = "what this music is for.\n\n'timing only': drawn on the timeline so you can place waypoints and text beats on the music. Changes nothing about the render or the export.\n\n'soundtrack': also mixed into ⇧ export as one video, under the clips. Its level and fades are the ♪ music fields in the REEL header.\n\n'model reference': also fed to the model as reference audio, so the generated sound imitates its character (it does not play the file back).\n\n'soundtrack + ref': both.";
+        for (const [v, label] of GUIDE_USES) {
+            const o = el("option", null, label);
+            o.value = v;
+            guideUse.appendChild(o);
+        }
+        guideUse.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        function guideApplyUse(use, name) {
+            const wantTrack = use === "track" || use === "both";
+            const wantRef = use === "ref" || use === "both";
             const g = node.properties?.h3_guide || {};
-            if (g.name) addFileAudio(g.name);
+            const patch = { use };
+            if (wantTrack && !(Number(g.level) > 0)) patch.level = 0.7;
+            if (!wantTrack) patch.level = 0;
+            if (wantRef && name && !fileLinesOf("ref_audio_files").includes(name)) {
+                addFileAudio(name);       // refreshes on its own
+                patch.refAdded = true;
+            } else if (!wantRef && g.refAdded && name) {
+                const lines = fileLinesOf("ref_audio_files").filter((x) => x !== name);
+                setWidget("ref_audio_files", lines.join("\n"));
+                patch.refAdded = false;
+            }
+            guideSet(patch);
+            refresh(true);
+            toast(wantTrack && wantRef ? "music is now the soundtrack AND a model reference"
+                : wantTrack ? "music will be mixed into the export — level and fades are the ♪ music fields in the REEL header"
+                : wantRef ? "music sent to reference audio — the model will imitate its character"
+                : "music is timing-only again — nothing about the render or export changes");
+        }
+        guideUse.addEventListener("change", () => {
+            const g = node.properties?.h3_guide || {};
+            guideApplyUse(guideUse.value, g.name);
         });
         const guideClr = el("button", { ...btnStyle, color: COL.red, padding: "1px 7px", fontSize: "11px" }, "✕");
-        guideClr.title = "remove the guide track (display only — nothing about the render changes)";
+        guideClr.title = "remove the music from the timeline (and from the export/reference if it was being used there)";
         guideClr.addEventListener("click", () => {
+            const g = node.properties?.h3_guide || {};
+            if (g.refAdded && g.name) {   // don't strand a reference we added
+                setWidget("ref_audio_files",
+                    fileLinesOf("ref_audio_files").filter((x) => x !== g.name).join("\n"));
+            }
+            stopGuidePrev();
             state.guideAudio = null;
             node.properties = node.properties || {};
             node.properties.h3_guide = {};
-            fill();
+            refresh(true);
             renderTrack();
         });
-        trackCtl.append(guideB, guideOffLab, guideOff,
+        trackCtl.append(guideB, guidePlayB, guideOffLab, guideOff,
             el("span", { fontSize: "11px", color: COL.text }, "s"),
-            gFollow.wrapEl, gSnap.wrapEl, guideRefB, guideClr,
+            gFollow.wrapEl, gSnap.wrapEl,
+            el("span", { fontSize: "11px", color: COL.text }, "use"), guideUse, guideClr,
             el("span", { fontSize: "11px", color: "#555" }, "·"));
         trackCtl.appendChild(el("span", { fontSize: "11px", color: COL.text }, "beats mode"));
         const modeSel = miniSelect("timed_text_mode", ["text only", "rope + text", "rope only"],
@@ -6621,12 +6704,20 @@ function attachTimeline(node) {
                         const lo = gaReady.peaks[b * 2], hi = gaReady.peaks[b * 2 + 1];
                         ctx.fillRect(T.x0 + px, T.by + lo * 14, 1, Math.max(1, (hi - lo) * 14));
                     }
-                    ctx.globalAlpha = 0.75;
+                    // detected hits: full-height ticks through the lane, not the
+                    // 6px slivers they were — you have to be able to aim at them
+                    ctx.globalAlpha = gg.snap ? 1.0 : 0.7;
                     ctx.fillStyle = COL.green;
                     for (const t of gaReady.onsets) {
                         if (t < off || t > off + winS) continue;
                         const x = T.x0 + ((t - off) / winS) * W;
-                        ctx.fillRect(x - 0.5, T.by - 20, 1, 6);
+                        ctx.fillRect(x - 1, T.by - 22, 2, 12);
+                        ctx.fillRect(x - 1, T.by - 6, 2, 24);
+                        if (gg.snap) {   // snap targets get a head you can see
+                            ctx.beginPath();
+                            ctx.arc(x, T.by - 24, 2.6, 0, Math.PI * 2);
+                            ctx.fill();
+                        }
                     }
                     ctx.restore();
                     ctx.fillStyle = COL.text;
@@ -6644,7 +6735,8 @@ function attachTimeline(node) {
             ctx.strokeStyle = COL.tick;
             ctx.beginPath(); ctx.moveTo(T.x0, T.by); ctx.lineTo(T.x1, T.by); ctx.stroke();
             ctx.fillStyle = COL.text; ctx.font = "11px monospace"; ctx.textAlign = "left";
-            ctx.fillText(state.beats.length ? "beats" : "beats — click here to add a timed prompt", T.x0, T.by + 22);
+            ctx.fillText(state.beats.length ? "text beats"
+                : "text beats — click here to pin words to a moment", T.x0, T.by + 22);
             ctx.textAlign = "center";
             const rowEnd = [-1e9, -1e9];   // greedy 2-row stagger, no overprint
             state.beats.forEach((b, i) => {
@@ -6752,7 +6844,7 @@ function attachTimeline(node) {
                 state.drag = { kind: "beattime", i: h.i, frac: state.beats[h.i].frac, x: p.x, T };
                 fill();
             } else if (h.kind === "beatlane") {
-                const frac = guideSnapFrac(xToFrac(T, p.x), 8 / (T.x1 - T.x0));
+                const frac = guideSnapFrac(xToFrac(T, p.x), 18 / (T.x1 - T.x0));
                 state.beats.push({ frac, text: "" });
                 state.beats.sort((a, b) => a.frac - b.frac);
                 state.sel = { kind: "beat", i: state.beats.findIndex((b) => b.frac === frac && !b.text) };
@@ -6778,7 +6870,7 @@ function attachTimeline(node) {
                 const lo = 1 / (F - 1), hi = (F - 2) / (F - 1);
                 m.frac = Math.min(hi, Math.max(lo, d.frac + (p.x - d.x) / (T.x1 - T.x0)));
                 m.frac = Math.min(hi, Math.max(lo,
-                    guideSnapFrac(m.frac, 8 / (T.x1 - T.x0))));   // ♪ snap first…
+                    guideSnapFrac(m.frac, 18 / (T.x1 - T.x0))));   // ♪ snap first…
                 // …then show the FRAME-snapped value that will actually be written
                 m.frac = roundHalfEven(m.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, m.frac),
@@ -6788,7 +6880,7 @@ function attachTimeline(node) {
             } else if (d.kind === "beattime") {
                 const b = state.beats[d.i];
                 b.frac = Math.min(1, Math.max(0, d.frac + (p.x - d.x) / (T.x1 - T.x0)));
-                b.frac = guideSnapFrac(b.frac, 8 / (T.x1 - T.x0));   // ♪ snap first
+                b.frac = guideSnapFrac(b.frac, 18 / (T.x1 - T.x0));   // ♪ snap first
                 b.frac = roundHalfEven(b.frac * (F - 1)) / (F - 1);
                 state.dragReadout = { x: fracToX(T, b.frac),
                     text: `${timeOf(b.frac).toFixed(2)}s · f${frameOf(b.frac)}` };
@@ -7104,9 +7196,14 @@ function attachTimeline(node) {
                     ? "♪ " + String(g.name).replace(/\s*\[\w+\]\s*$/, "").split("/").pop().slice(0, 20)
                     : "pick…";
                 guideB.style.color = on ? COL.green : COL.bright;
-                for (const elx of [guideOffLab, guideOff, gFollow.wrapEl, gSnap.wrapEl,
-                                   guideRefB, guideClr])
+                for (const elx of [guidePlayB, guideOffLab, guideOff, gFollow.wrapEl,
+                                   gSnap.wrapEl, guideUse, guideClr])
                     elx.style.display = on ? "" : "none";
+                guideUse.previousSibling && (guideUse.previousSibling.style.display =
+                    on ? "" : "none");
+                if (on && document.activeElement !== guideUse)
+                    guideUse.value = g.use || "guide";
+                if (!on) stopGuidePrev();
                 musicLab.style.display = on ? "" : "none";
                 musicF.style.display = on ? "" : "none";
                 const mixOn = on && (Number(g.level) || 0) > 0;
