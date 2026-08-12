@@ -334,6 +334,7 @@ const SETUP_FIELDS = [
     "motion_context_frames", "motion_context_audio_frames",
     "v2v_noise", "v2v_noise_declare",
     "motion_context_reuse_latent", "motion_context_anchor_brightness",
+    "motion_context_strength",
     "mask_ref_pixels",
 ];
 
@@ -353,6 +354,7 @@ const SETUP_DEFAULTS = {
     motion_context_frames: 22, motion_context_audio_frames: 22,
     v2v_noise: 0.0, v2v_noise_declare: 1.0,
     motion_context_reuse_latent: true, motion_context_anchor_brightness: false,
+    motion_context_strength: 1.0,
     mask_ref_pixels: false,
 };
 
@@ -3849,6 +3851,27 @@ function attachTimeline(node) {
             fill();
         };
         for (const f of [mcFrames, mcAudio, mcEnd]) f.addEventListener("blur", commitMc);
+        const mcStr = dimField(42);
+        mcStr.title = "how hard the pinned frames are enforced. 1.0 copies them exactly — seamless, but artifacts in the pinned tail get copied too and compound down a chain. 0.90–0.95 makes the model REGENERATE that region guided by the previous clip instead of duplicating it: motion and framing carry over, accumulated blockiness doesn't.";
+        mcStr.addEventListener("blur", () => {
+            const v = Math.max(0, Math.min(1, parseFloat(mcStr.value)));
+            setWidget("motion_context_strength", isFinite(v) ? Math.round(v * 20) / 20 : 1.0);
+            fill();
+        });
+        const mcReuse = el("label", { display: "none", gap: "4px", alignItems: "center",
+            fontSize: "11px", color: COL.text, cursor: "pointer", whiteSpace: "nowrap" });
+        const mcReuseCb = el("input");
+        mcReuseCb.type = "checkbox";
+        mcReuse.title = "pin the previous render's LATENT instead of decoding its file and re-encoding it. Removes a whole VAE round trip per link — the round trip that prints a 16px grid into a long chain. Falls back automatically (and says why in the log) when the cached latent isn't the right clip or canvas.";
+        mcReuseCb.addEventListener("change", () => {
+            setWidget("motion_context_reuse_latent", mcReuseCb.checked);
+            toast(mcReuseCb.checked
+                ? "latent reuse on — continuations skip the VAE round trip"
+                : "latent reuse OFF — every link will decode and re-encode through the VAE",
+                !mcReuseCb.checked);
+            refresh(true);
+        });
+        mcReuse.append(mcReuseCb, el("span", null, "⚡ latent reuse"));
         const mcAnchor = el("label", { display: "none", gap: "4px", alignItems: "center",
             fontSize: "11px", color: COL.text, cursor: "pointer", whiteSpace: "nowrap" });
         const mcAnchorCb = el("input");
@@ -3881,7 +3904,8 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "audio"), mcAudio,
             el("span", { color: COL.text, fontSize: "11px" }, "end"), mcEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            mcAnchor, mcPick, mcClear);
+            el("span", { color: COL.text, fontSize: "11px" }, "str"), mcStr,
+            mcReuse, mcAnchor, mcPick, mcClear);
 
         // ---- motion path: Ken Burns through the model -----------------------
         // Two windows (A=start, B=end) over one image; the chosen curve places
@@ -6914,8 +6938,16 @@ function attachTimeline(node) {
                 // once a context clip is set
                 mcEnd.disabled = !mf;
                 mcAnchor.style.display = mf ? "flex" : "none";
+                mcReuse.style.display = mf ? "flex" : "none";
+                mcStr.style.display = mf ? "" : "none";
                 if (mf && document.activeElement !== mcAnchorCb)
                     mcAnchorCb.checked = !!widgetValue(node, "motion_context_anchor_brightness", false);
+                if (mf && document.activeElement !== mcReuseCb)
+                    mcReuseCb.checked = !!widgetValue(node, "motion_context_reuse_latent", true);
+                if (mf && document.activeElement !== mcStr) {
+                    const sv = Number(widgetValue(node, "motion_context_strength", 1.0));
+                    mcStr.value = (isFinite(sv) ? sv : 1.0).toFixed(2);
+                }
                 mcNote.style.display = mf ? "" : "none";
                 mcThumb.style.display = mf ? "" : "none";
                 if (mf) {

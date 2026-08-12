@@ -144,6 +144,7 @@ MC_FRAME_PER_TOKEN = (1, 4, 4, 4, 4)  # pixel frames covered by latent step k%5
 MC_VIDEO_RUN_GRID = (39, 22, 5, 1)    # run lengths the video VAE distinguishes
 MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
 MC_ANCHOR_CLAMP = 0.08    # max brightness nudge per link (0-1 RGB scale)
+MC_NOISE_SEED_BASE = 700  # per-block seeds for sub-1.0 context strength
 
 
 def mc_step_offsets(latent_t):
@@ -758,6 +759,8 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                     tooltip="When the clip you're continuing is a render THIS SESSION just made, pin its latent directly instead of decoding the file and re-encoding it. That removes a whole VAE round trip per link -- the loss that compounds and softens a long chain -- and pins the model's own output rather than a lossy copy of it. Falls back to re-encoding automatically, with the reason in the log, whenever the cached latent isn't the right clip, canvas or cut point. Only the tail is held in memory (a few MB). Turn off to force the file path."),
                 io.Boolean.Input("motion_context_anchor_brightness", default=False,
                     tooltip="EXPERIMENTAL, off by default. Stops a chain's brightness drifting, by correcting the CONDITIONING instead of the finished pixels.\n\nThe pinned context is what the model matches, so before pinning it the node measures what the previous render actually came out at (read straight from its latent -- no decode) and nudges the context by the error against the chain's anchor, taken from its first link. Nothing assumes how much a link drifts: 0.5% drift gets a 0.5% correction, 4% gets 4%, and if the model only partly follows the nudge the residue is corrected next link -- it converges instead of accumulating.\n\nCosts nothing (an add on a tensor already in memory), never touches finished pixels (so no clipped highlights and no clip paying for the ones before it), and it fixes the render FILES, not just the export. Clamped to +-0.08 so a deliberate lighting change isn't fought. Needs motion_context_reuse_latent; clear the reel to re-anchor.\n\nWhile it's off, nothing about the render changes."),
+                io.Float.Input("motion_context_strength", default=1.0, min=0.0, max=1.0, step=0.05,
+                    tooltip="How hard the pinned context frames are enforced. 1.0 (default) is ground truth: the model reproduces them exactly, which gives a seamless join -- and also copies any artifact they carry, so blockiness compounds down a long chain (measured: a 16px grid growing ~4% per link).\n\nBelow 1.0 the pinned rows are treated as a reference at that noise level instead of clean content, so the model REGENERATES the region guided by the previous clip rather than duplicating it. Motion, framing and colour carry over; accumulated artifacts don't. 0.90-0.95 is the range to try first -- low enough to break the loop, high enough that the join stays invisible. Below ~0.7 the join itself starts to drift.\n\nUses the same flow-blend and per-row timestep labelling as the keyframe strength dials."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -863,7 +866,7 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                 motion_context_frames=22, motion_context_audio_frames=22,
                 v2v_noise=0.0, v2v_noise_declare=1.0,
                 motion_context_reuse_latent=True,
-                motion_context_anchor_brightness=False,
+                motion_context_anchor_brightness=False, motion_context_strength=1.0,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
                 first_frame=None, last_frame=None, middle_frames=None,
@@ -1087,6 +1090,14 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                         mc_cached = (entry, got)
                 else:
                     logging.info("MiniMaxH3Guide: motion context re-encoding (%s).", why)
+            else:
+                # never silent: a disabled toggle used to look identical to a
+                # working cache in the log, which hid a whole VAE round trip
+                logging.warning(
+                    "MiniMaxH3Guide: motion_context_reuse_latent is OFF — this link "
+                    "decodes the clip and re-encodes it through the VAE. That round "
+                    "trip is what prints the 16px grid into a chain; switch it on "
+                    "unless you have a reason not to.")
 
             if mc_cached is not None:
                 entry, (blocks, offsets, span) = mc_cached
@@ -1202,6 +1213,36 @@ class MiniMaxH3ImageToVideoGuide(io.ComfyNode):
                             mc_audio_block = {"kind": "audio", "ref_audio_t": rt_a,
                                               "audio_latent": z_a,
                                               MC_AUDIO_END_KEY: float(mc_span)}
+
+            # Loop gain: pinned rows are ground truth at 1.0, so the model
+            # reproduces them EXACTLY -- artifacts included. Chain that and any
+            # blockiness in the pinned tail is copied forward, re-rendered
+            # slightly worse, and pinned again: a feedback loop with gain just
+            # above 1 (measured: a 16px grid growing ~4%/link). Below 1.0 the
+            # rows become "a reference at noise level a" via the same
+            # flow-blend + per-row label used for keyframes, so the model
+            # REGENERATES that region guided by the previous clip instead of
+            # duplicating it. Motion and composition survive; accumulated
+            # artifacts do not.
+            mcs = max(0.0, min(1.0, float(motion_context_strength)))
+            if mcs < 1.0 and mc_keyframes:
+                if row_aug_ready():
+                    a_lbl = mcs * _VIS_T
+                    for i, kf in enumerate(mc_keyframes):
+                        kf["noise_aug"] = a_lbl
+                        kf["latent"] = flow_blend(kf["latent"], a_lbl,
+                                                  MC_NOISE_SEED_BASE + i)
+                    logging.info("MiniMaxH3Guide: motion context pinned at strength "
+                                 "%.2f (rows labelled %.3f) — the model refreshes the "
+                                 "pinned region instead of copying it, which stops "
+                                 "artifacts compounding down a chain.", mcs, a_lbl)
+                else:
+                    for i, kf in enumerate(mc_keyframes):
+                        kf["latent"] = weaken_cond_latent(kf["latent"], mcs,
+                                                          MC_NOISE_SEED_BASE + i)
+                    logging.warning("MiniMaxH3Guide: motion context strength %.2f "
+                                    "without the per-row label patch — softened, but "
+                                    "expect less clean results than at 1.0.", mcs)
 
             if first_frame is not None or first_frame_file.strip():
                 logging.info("MiniMaxH3Guide: motion context occupies frames 0-%d -- "
