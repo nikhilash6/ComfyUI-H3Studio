@@ -3073,6 +3073,7 @@ function attachTimeline(node) {
         const resClose = el("button", { ...btnStyle, padding: "0 7px", fontSize: "11px" }, "✕");
         resClose.addEventListener("click", () => {
             stopVideosIn(resBody);   // hiding doesn't stop playback — audio ghosted on
+            stopDockMusic();
             resPanel.style.display = "none";
         });
         resHead.append(resTitle, resClose);
@@ -3080,6 +3081,14 @@ function attachTimeline(node) {
         const resFoot = el("div", { display: "none", gap: "6px", padding: "6px 8px", flexWrap: "wrap" });
         resPanel.append(resHead, resBody, resFoot);
 
+        // the soundtrack layer that plays over a preview in the dock
+        let dockMusic = null;
+        const stopDockMusic = () => {
+            if (!dockMusic) return;
+            try { dockMusic.pause(); dockMusic.removeAttribute("src"); dockMusic.load(); }
+            catch (e) { /* gone */ }
+            dockMusic = null;
+        };
         const showPanel = (title) => {
             resTitle.textContent = title;
             resPanel.style.display = "";
@@ -3101,11 +3110,42 @@ function attachTimeline(node) {
         const showResult = (name, isVideo) => {
             const renderedSpan = run.mcSpan;   // captured at queue time
             stopVideosIn(resBody, true);
+            stopDockMusic();
             resBody.textContent = "";
             if (isVideo) {
                 const v = el("video", { width: "100%", display: "block" });
-                v.controls = true; v.autoplay = true; v.loop = true; v.muted = true;
+                v.controls = true; v.loop = true;
+                // audible by default: a silent preview of an audio-video model
+                // is a strange thing to hand someone. Autoplay policies may
+                // refuse sound, in which case fall back to a muted autoplay and
+                // let the controls unmute.
+                v.muted = false;
                 v.src = inputFileUrl(name);
+                v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
+                // the soundtrack plays over it, at the reel position this clip
+                // would occupy — so the preview sounds like the finished piece
+                const gm2 = node.properties?.h3_guide || {};
+                if (gm2.name && (Number(gm2.level) || 0) > 0) {
+                    const off = guideOffset() ?? 0;
+                    dockMusic = document.createElement("audio");
+                    dockMusic.src = inputFileUrl(gm2.name);
+                    dockMusic.volume = Math.min(1, Number(gm2.level));
+                    const syncTo = () => {
+                        if (!dockMusic) return;
+                        const want = off + Math.max(0, v.currentTime - (renderedSpan / FPS));
+                        if (Math.abs(dockMusic.currentTime - want) > 0.25)
+                            dockMusic.currentTime = want;
+                    };
+                    v.addEventListener("play", () => {
+                        if (!dockMusic) return;
+                        syncTo();
+                        dockMusic.play().catch(() => {});
+                    });
+                    v.addEventListener("pause", () => dockMusic && dockMusic.pause());
+                    v.addEventListener("seeked", syncTo);
+                    v.addEventListener("timeupdate", syncTo);
+                    if (!v.paused) { syncTo(); dockMusic.play().catch(() => {}); }
+                }
                 if (renderedSpan > 0) {
                     // a motion-context render opens by repeating the pinned tail
                     // (that IS the context) — preview the clip as it will appear
@@ -5443,50 +5483,12 @@ function attachTimeline(node) {
         };
         const fadeInF = fxField("fade in", "fadeIn");
         const fadeOutF = fxField("fade out", "fadeOut");
-        // ♪ music bed level for the EXPORT (and the play-reel preview) — the
-        // guide track file, mixed under the clip audio at this percent
-        const musicLab = el("span", { color: COL.text, fontSize: "11px", display: "none" }, "♪ music");
-        const musicF = el("input");
-        Object.assign(musicF.style, {
-            width: "42px", background: COL.input, color: COL.bright,
-            border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
-            padding: "2px 4px", fontFamily: "monospace", textAlign: "center", display: "none",
-        });
-        musicF.title = "mix the ♪ guide track under the exported reel at this level, in percent (0 = keep the guide display-only). The song starts at reel time 0 in follow-reel mode, or at the guide's offset otherwise. ▶ play reel previews the mix live.";
-        musicF.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") musicF.blur(); });
-        musicF.addEventListener("blur", () => {
-            const v = Math.max(0, Math.min(150, parseFloat(musicF.value) || 0));
-            musicF.value = String(Math.round(v));
-            node.properties = node.properties || {};
-            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v / 100 };
-        });
-        // bed-only fades: the reel usually sits mid-song — ease the music in
-        // and out on its own, independent of the whole-reel fades
-        const mkMusicFade = (key, label) => {
-            const f = el("input");
-            Object.assign(f.style, {
-                width: "36px", background: COL.input, color: COL.bright,
-                border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
-                padding: "2px 4px", fontFamily: "monospace", textAlign: "center",
-                display: "none",
-            });
-            f.title = `music ${label}, in seconds — eases just the bed (a reel that starts or ends mid-song sounds abrupt otherwise). Separate from the whole-reel fades.`;
-            f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
-            f.addEventListener("blur", () => {
-                const v = Math.max(0, Math.min(15, parseFloat(f.value) || 0));
-                f.value = String(v);
-                node.properties = node.properties || {};
-                node.properties.h3_guide = { ...(node.properties.h3_guide || {}), [key]: v };
-            });
-            return f;
-        };
-        const musicFiF = mkMusicFade("musicFadeIn", "fade in");
-        const musicFoF = mkMusicFade("musicFadeOut", "fade out");
-        const musicFadeLab = el("span", { color: COL.text, fontSize: "11px", display: "none" }, "♪fade");
         const playReelB = el("button", { ...btnStyle, color: COL.green }, "▶ play reel");
         playReelB.title = "preview the chain as it stands, without exporting — trims respected, joins as hard cuts (crossfades, fades and luma-match only apply at export)";
         playReelB.addEventListener("click", () => openReelPlayer());
-        reelCtl.append(undoB, playReelB, musicLab, musicF, musicFadeLab, musicFiF, musicFoF,
+        // the music level and its fades moved to the ♪ soundtrack lane in the
+        // AUDIO section — one home for audio, next to the fx lanes
+        reelCtl.append(undoB, playReelB,
             el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
             muteAllB, reelAddB, rerollB, clearB, exportB);
@@ -5505,7 +5507,100 @@ function attachTimeline(node) {
             gap: "16px", alignItems: "center",
         });
         sfxHead.appendChild(el("span", null,
-            "FX TRACKS — sound effects laid over the whole reel (band hit here, car engine there). Drag chips to place; click one for volume + fades. Mixed at export; ▶ play reel previews them"));
+            "AUDIO — the soundtrack across the whole reel, then three FX lanes for placed sounds (band hit here, car engine there). Drag chips to place; click one for volume + fades. Everything here is previewed by ▶ play reel and mixed at export"));
+
+        // ♪ SOUNDTRACK lane: the music bed, shown where the rest of the audio
+        // lives instead of only as a number in the reel header
+        const trkRow = el("div", { display: "flex", gap: "8px", alignItems: "center" });
+        trkRow.appendChild(el("span", {
+            color: COL.text, fontSize: "10px", fontFamily: "monospace", width: "26px",
+        }, "♪"));
+        const trkLane = el("div", {
+            position: "relative", flex: "1", height: "24px", background: "#101010",
+            border: `1px solid ${COL.border}`, borderRadius: "3px", overflow: "hidden",
+            cursor: "pointer",
+        });
+        trkLane.title = "the music laid under the whole reel. Pick it in the TIMELINE header (♪ music) and set its use to 'soundtrack' — click here to choose one.";
+        trkLane.addEventListener("click", () => {
+            const g = node.properties?.h3_guide || {};
+            if (g.name) { guideApplyUse(g.use === "both" ? "ref" : "guide", g.name); return; }
+            openAudioPicker((n) => {
+                state.guideAudio = null;
+                guideSet({ name: n });
+                guideApplyUse("track", n);
+            });
+        });
+        const trkVol = el("input");
+        trkVol.type = "range"; trkVol.min = "0"; trkVol.max = "150"; trkVol.step = "5";
+        Object.assign(trkVol.style, { width: "110px", accentColor: COL.slider, cursor: "pointer" });
+        trkVol.title = "soundtrack level in the export (and in ▶ play reel / the render preview)";
+        trkVol.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        trkVol.addEventListener("input", () => {
+            const v = parseInt(trkVol.value, 10) / 100;
+            node.properties = node.properties || {};
+            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), level: v,
+                use: v > 0 ? ((node.properties.h3_guide || {}).use === "ref"
+                    || (node.properties.h3_guide || {}).use === "both" ? "both" : "track")
+                    : ((node.properties.h3_guide || {}).use === "both" ? "ref" : "guide") };
+            trkPct.textContent = Math.round(v * 100) + "%";
+            fill();
+        });
+        const trkPct = el("span", { color: COL.text, fontSize: "10px",
+            fontFamily: "monospace", minWidth: "34px", textAlign: "right" }, "0%");
+        // own field builder: sfxField is declared further down, so using it
+        // here would blow up at setup time
+        const trkField = () => {
+            const f = el("input");
+            Object.assign(f.style, {
+                width: "36px", background: COL.input, color: COL.bright,
+                border: `1px solid ${COL.border}`, borderRadius: "3px", fontSize: "12px",
+                padding: "2px 4px", fontFamily: "monospace", textAlign: "center",
+            });
+            f.addEventListener("keydown", (ev) => { ev.stopPropagation(); if (ev.key === "Enter") f.blur(); });
+            return f;
+        };
+        const trkFi = trkField(), trkFo = trkField();
+        trkFi.title = "soundtrack fade in, seconds";
+        trkFo.title = "soundtrack fade out, seconds";
+        const trkFade = (f, key) => f.addEventListener("blur", () => {
+            const v = Math.max(0, Math.min(15, parseFloat(f.value) || 0));
+            node.properties = node.properties || {};
+            node.properties.h3_guide = { ...(node.properties.h3_guide || {}), [key]: v };
+            fill();
+        });
+        trkFade(trkFi, "musicFadeIn");
+        trkFade(trkFo, "musicFadeOut");
+        trkRow.append(trkLane, trkVol, trkPct,
+            el("span", { color: COL.text, fontSize: "10px" }, "fade"), trkFi,
+            el("span", { color: COL.text, fontSize: "10px" }, "/"), trkFo);
+        sfxWrap.appendChild(trkRow);
+
+        function renderSoundtrackLane() {
+            const g = node.properties?.h3_guide || {};
+            const lvl = Number(g.level) || 0;
+            trkLane.textContent = "";
+            if (!g.name) {
+                trkLane.appendChild(el("div", {
+                    position: "absolute", inset: "0", display: "flex", alignItems: "center",
+                    padding: "0 8px", color: "#666", fontSize: "11px",
+                }, "no soundtrack — click to add music across the whole reel"));
+            } else {
+                const nm = g.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
+                trkLane.appendChild(el("div", {
+                    position: "absolute", inset: "1px", borderRadius: "2px",
+                    background: lvl > 0 ? "rgba(120,170,255,0.22)" : "rgba(120,120,120,0.12)",
+                    border: `1px solid ${lvl > 0 ? COL.slider : COL.border}`,
+                    display: "flex", alignItems: "center", padding: "0 8px",
+                    color: lvl > 0 ? COL.bright : COL.text, fontSize: "11px",
+                    fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden",
+                }, "♪ " + nm + (lvl > 0 ? "" : "  (timing only — not in the export)")));
+            }
+            if (document.activeElement !== trkVol) trkVol.value = String(Math.round(lvl * 100));
+            trkPct.textContent = Math.round(lvl * 100) + "%";
+            trkPct.style.color = lvl > 0 ? COL.bright : "#666";
+            if (document.activeElement !== trkFi) trkFi.value = String(Number(g.musicFadeIn) || 0);
+            if (document.activeElement !== trkFo) trkFo.value = String(Number(g.musicFadeOut) || 0);
+        }
         const sfxWrap = el("div", {
             display: "none", flexDirection: "column", gap: "4px",
             padding: "4px 16px 10px", flex: "0 0 auto",
@@ -5664,9 +5759,11 @@ function attachTimeline(node) {
         };
 
         function renderSfx() {
+            renderSoundtrackLane();
             const tracks = sfxGet();
             const any = tracks.some((x) => x.length);
-            const show = reelGet().length || any;
+            const show = reelGet().length || any
+                || !!node.properties?.h3_guide?.name;
             sfxHead.style.display = show ? "flex" : "none";
             sfxWrap.style.display = show ? "flex" : "none";
             if (!show) return;
@@ -7271,19 +7368,7 @@ function attachTimeline(node) {
                 if (on && document.activeElement !== guideUse)
                     guideUse.value = g.use || "guide";
                 if (!on) stopGuidePrev();
-                musicLab.style.display = on ? "" : "none";
-                musicF.style.display = on ? "" : "none";
-                const mixOn = on && (Number(g.level) || 0) > 0;
-                for (const elx of [musicFadeLab, musicFiF, musicFoF])
-                    elx.style.display = mixOn ? "" : "none";
-                if (on && document.activeElement !== musicF)
-                    musicF.value = String(Math.round((Number(g.level) || 0) * 100));
-                if (mixOn) {
-                    if (document.activeElement !== musicFiF)
-                        musicFiF.value = String(Number(g.musicFadeIn) || 0);
-                    if (document.activeElement !== musicFoF)
-                        musicFoF.value = String(Number(g.musicFadeOut) || 0);
-                }
+                // level/fades now live in the ♪ soundtrack lane (renderSfx)
                 if (on) {
                     guideOff.disabled = !!g.follow;
                     if (document.activeElement !== guideOff) {
