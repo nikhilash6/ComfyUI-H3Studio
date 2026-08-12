@@ -16,7 +16,7 @@ export as one video.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <your-repo-url> ComfyUI-H3Studio
+git clone https://github.com/shootthesound/ComfyUI-H3Studio
 ```
 
 Restart ComfyUI, then **hard-refresh the browser** (Ctrl+Shift+R) — the pack
