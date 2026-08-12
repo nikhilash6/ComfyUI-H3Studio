@@ -1,7 +1,7 @@
 {
   "id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
   "revision": 0,
-  "last_node_id": 160,
+  "last_node_id": 161,
   "last_link_id": 349,
   "nodes": [
     {
@@ -215,7 +215,7 @@
         106
       ],
       "flags": {},
-      "order": 6,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {
@@ -257,7 +257,7 @@
         60
       ],
       "flags": {},
-      "order": 8,
+      "order": 9,
       "mode": 0,
       "inputs": [
         {
@@ -299,7 +299,7 @@
         126
       ],
       "flags": {},
-      "order": 9,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {
@@ -359,7 +359,8 @@
         "cnr_id": "comfyui-minimax-h3-turbo",
         "ver": "a7624b4c00626a8ae7e78860769389d706565190",
         "Node name for S&R": "MiniMaxH3TurboSampler"
-      }
+      },
+      "widgets_values": []
     },
     {
       "id": 125,
@@ -373,7 +374,7 @@
         338.18307175937207
       ],
       "flags": {},
-      "order": 10,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -438,7 +439,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 11,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -482,7 +483,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 12,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -524,7 +525,7 @@
         110
       ],
       "flags": {},
-      "order": 13,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -570,7 +571,7 @@
         1210.7531026376882
       ],
       "flags": {},
-      "order": 14,
+      "order": 15,
       "mode": 0,
       "inputs": [
         {
@@ -598,6 +599,29 @@
       ]
     },
     {
+      "id": 161,
+      "type": "Note",
+      "pos": [
+        -1798.8912343293975,
+        5218.737208028643
+      ],
+      "size": [
+        314.4394365546402,
+        88
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "CLICK HERE TO THE RIGHT TO OPEN THE EDITOR ---->"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
       "id": 159,
       "type": "H3StudioImageToVideo",
       "pos": [
@@ -609,7 +633,7 @@
         1618
       ],
       "flags": {},
-      "order": 7,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {
@@ -983,10 +1007,10 @@
     "VHS_MetadataImage": true,
     "VHS_KeepIntermediate": true,
     "ds": {
-      "scale": 0.3138428376721194,
+      "scale": 0.5559917313492586,
       "offset": [
-        3641.376899935236,
-        -3389.667241401932
+        3971.142989881464,
+        -3670.835498888986
       ]
     }
   },
