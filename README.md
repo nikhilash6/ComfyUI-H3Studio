@@ -35,10 +35,19 @@ of this page is things you can add to it.
 
 ## Your first clip
 
-1. On the **H3 Studio (Image to Video)** node, click **⤢ open timeline editor**.
+<img src="docs/images/open-editor.png" align="right" width="330"
+     alt="The node, with the open timeline editor button on it">
+
+**⤢ Where's the editor?** On the node itself — the **⤢ open timeline editor**
+button, right there in the screenshot. The node is a doorway; its widgets are
+only what the editor writes, so you never need to touch them.
+
+1. Click **⤢ open timeline editor** on the node.
 2. Click **+ pick first frame** and choose an image.
 3. Type a prompt.
 4. **▶ queue**.
+
+<br clear="right">
 
 ![Size, length and prompt](docs/images/prompt-header.png)
 
