@@ -8,6 +8,8 @@ independent strength dials, a fullscreen timeline, clip-to-clip continuation
 with real motion and audio continuity, and a reel you can trim, score and
 export as one video.
 
+![The fullscreen editor](docs/images/editor-overview.png)
+
 > Want one-line answers instead? [Quick recipes](GUIDE.md).
 
 ## Install
@@ -38,7 +40,11 @@ of this page is things you can add to it.
 3. Type a prompt.
 4. **▶ queue**.
 
-Everything else lives in that editor. You never need to leave fullscreen.
+![Size, length and prompt](docs/images/prompt-header.png)
+
+Size, clip length and the frame count sit in the header; the prompt is right
+under it. Everything else lives in that editor — you never need to leave
+fullscreen.
 
 ## What the editor gives you
 
@@ -48,9 +54,12 @@ Everything else lives in that editor. You never need to leave fullscreen.
 - **Timeline** — drag markers to move a keyframe in time; the square cap on each
   stem sets its strength. Text beats pin words to a moment.
 - **References** — images that define a subject for the *whole* clip rather than
-  a moment. Plus reference audio and reference video.
+  a moment. Plus reference audio and reference video. Each one becomes a chip
+  above the prompt: click it to cite that picture where your cursor is.
 - **Reel** — finished clips chained at the bottom, with trims, crossfades,
   per-clip volume, audio lanes, and one-button export.
+
+![Reference chips and the motion bar](docs/images/prompt-chips-motion.png)
 
 ## If you want to…
 
@@ -68,6 +77,8 @@ Honest limits.)
 ### …make the next clip continue this one
 Hit **▶ queue** with a clip in the reel and a chooser appears:
 
+![The queue chooser](docs/images/queue-chooser.png)
+
 - **⏭▶ continue with motion** — the previous clip's tail frames *and audio* are
   pinned at the new head. Same motion, same direction, the same waveform carried
   on rather than imitated. The render opens by repeating that pinned tail, which
@@ -78,9 +89,17 @@ Hit **▶ queue** with a clip in the reel and a chooser appears:
 
 The loop is *queue → choose → render → 🎞 add to reel → queue again*.
 
+![Motion controls](docs/images/motion-controls.png)
+
+The MOTION bar carries the dials: how many frames to pin, **⚡ latent reuse**
+(hands the previous clip's own latent over instead of decoding and re-encoding
+it, which is what stops quality compounding down a chain), and **⚖ anchor
+brightness** if a long chain starts to drift.
+
 ### …build several clips hands-free
-Pick **🔁 auto motion** in that same chooser and give it a number. It queues,
-adds to the reel, and continues from itself that many times.
+Pick **Auto Motion Mode** in that same chooser and give it a clip count. It
+queues, adds to the reel, and continues from itself that many times, same prompt
+and settings each clip. Stop it any time from the header.
 
 ### …keep the same person across clips
 Add their photos with **+ reference** (`1.0` locks identity, `0.7` is a likeness
@@ -97,20 +116,46 @@ either end to trim, click it for volume and fades.
 Set **use** to *timing only* if you just want the beats to aim at, or *model
 reference* if you want the model to imitate the sound's character.
 
+![The reel and the four audio lanes](docs/images/reel-and-audio-lanes.png)
+
 ### …add sound effects
 Three **fx lanes** sit under the soundtrack lane, and they work identically —
 each holds as many files as you like. **+** on a lane opens the audio picker;
 the sample lands as a chip you drag into place.
+
+### …find images or sounds without leaving ComfyUI
+Any picker has a **🌐 web…** tab: type a search and results come from Openverse,
+all Creative Commons or public domain, with the licence and creator on every
+card. Clicking one downloads it into `input/web/` and uses it immediately, and
+every pull is logged to `input/web/credits.txt` for attribution.
+
+![Free audio search](docs/images/audio-picker-web.png)
+
+![Free image search](docs/images/image-picker-web.png)
 
 ### …export the whole thing as one video
 **⇧ export as one video** on the reel. Per-clip in/out trims, crossfades at the
 joins, whole-reel fade in/out, per-clip volume, the soundtrack and every fx lane
 are mixed server-side. **▶ play reel** previews the lot first, without exporting.
 
+![Reel controls](docs/images/reel-controls.png)
+
+Each card carries the clip that made it. **✂** trims it without touching the
+file, the slider sets its volume in the mix, and **⚙** brings the whole setup
+that produced it back into the editor.
+
+![A reel card](docs/images/reel-card.png)
+
 ### …restyle existing footage (v2v)
 Load a clip into **V2V** at the top of the editor (drag and drop works), set the
 section and a denoise around `0.5`, and prompt the change you want. **match
 aspect** conforms the output to the footage.
+
+![Footage under the timeline](docs/images/timeline-filmstrip.png)
+
+The footage draws faintly under the timeline, so you can place keyframes and
+beats against what is actually happening in the shot. The slider beside it sets
+how visible that is, down to nothing.
 
 ### …change only part of the frame
 **H3 Soft Denoise Zone** takes your latent and a mask and holds everything
