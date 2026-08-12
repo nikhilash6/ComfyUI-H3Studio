@@ -3849,6 +3849,19 @@ function attachTimeline(node) {
             fill();
         };
         for (const f of [mcFrames, mcAudio, mcEnd]) f.addEventListener("blur", commitMc);
+        const mcAnchor = el("label", { display: "none", gap: "4px", alignItems: "center",
+            fontSize: "11px", color: COL.text, cursor: "pointer", whiteSpace: "nowrap" });
+        const mcAnchorCb = el("input");
+        mcAnchorCb.type = "checkbox";
+        mcAnchor.title = "EXPERIMENTAL. Keep the chain's brightness from drifting by correcting the CONDITIONING: the node reads what the last render actually came out at (from its latent — no decode) and nudges the pinned context by the error against the chain's anchor. No gain is ever applied to finished pixels, it costs nothing, and it fixes the render files themselves rather than only the export. Clamped, and it re-anchors when you empty the reel.";
+        mcAnchorCb.addEventListener("change", () => {
+            setWidget("motion_context_anchor_brightness", mcAnchorCb.checked);
+            toast(mcAnchorCb.checked
+                ? "brightness anchoring on — the chain levels itself from the next render"
+                : "brightness anchoring off");
+            refresh(true);
+        });
+        mcAnchor.append(mcAnchorCb, el("span", null, "⚖ anchor brightness"));
         const mcPick = el("button", btnStyle, "pick clip…");
         mcPick.title = "continue WITH MOTION from a specific video that isn't in the reel (output tab = previous renders) — the ▶ queue chooser offers it as the 'picked' source";
         mcPick.addEventListener("click", () => openVideoPicker((n) => {
@@ -3868,7 +3881,7 @@ function attachTimeline(node) {
             el("span", { color: COL.text, fontSize: "11px" }, "audio"), mcAudio,
             el("span", { color: COL.text, fontSize: "11px" }, "end"), mcEnd,
             el("span", { color: COL.text, fontSize: "11px" }, "s"),
-            mcPick, mcClear);
+            mcAnchor, mcPick, mcClear);
 
         // ---- motion path: Ken Burns through the model -----------------------
         // Two windows (A=start, B=end) over one image; the chosen curve places
@@ -6900,6 +6913,9 @@ function attachTimeline(node) {
                 // editable ahead of time; the cut point only means something
                 // once a context clip is set
                 mcEnd.disabled = !mf;
+                mcAnchor.style.display = mf ? "flex" : "none";
+                if (mf && document.activeElement !== mcAnchorCb)
+                    mcAnchorCb.checked = !!widgetValue(node, "motion_context_anchor_brightness", false);
                 mcNote.style.display = mf ? "" : "none";
                 mcThumb.style.display = mf ? "" : "none";
                 if (mf) {
