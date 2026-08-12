@@ -3858,7 +3858,7 @@ function attachTimeline(node) {
             setWidget("motion_context_strength", isFinite(v) ? Math.round(v * 20) / 20 : 1.0);
             fill();
         });
-        const mcReuse = el("label", { display: "none", gap: "4px", alignItems: "center",
+        const mcReuse = el("label", { display: "flex", gap: "4px", alignItems: "center",
             fontSize: "11px", color: COL.text, cursor: "pointer", whiteSpace: "nowrap" });
         const mcReuseCb = el("input");
         mcReuseCb.type = "checkbox";
@@ -3872,7 +3872,7 @@ function attachTimeline(node) {
             refresh(true);
         });
         mcReuse.append(mcReuseCb, el("span", null, "⚡ latent reuse"));
-        const mcAnchor = el("label", { display: "none", gap: "4px", alignItems: "center",
+        const mcAnchor = el("label", { display: "flex", gap: "4px", alignItems: "center",
             fontSize: "11px", color: COL.text, cursor: "pointer", whiteSpace: "nowrap" });
         const mcAnchorCb = el("input");
         mcAnchorCb.type = "checkbox";
@@ -6937,17 +6937,20 @@ function attachTimeline(node) {
                 // editable ahead of time; the cut point only means something
                 // once a context clip is set
                 mcEnd.disabled = !mf;
-                mcAnchor.style.display = mf ? "flex" : "none";
-                mcReuse.style.display = mf ? "flex" : "none";
-                mcStr.style.display = mf ? "" : "none";
-                if (mf && document.activeElement !== mcAnchorCb)
+                // these three are settings for the NEXT continuation, so they
+                // stay visible with no context set — you have to be able to
+                // arm them BEFORE the render that uses them
+                if (document.activeElement !== mcAnchorCb)
                     mcAnchorCb.checked = !!widgetValue(node, "motion_context_anchor_brightness", false);
-                if (mf && document.activeElement !== mcReuseCb)
+                if (document.activeElement !== mcReuseCb)
                     mcReuseCb.checked = !!widgetValue(node, "motion_context_reuse_latent", true);
-                if (mf && document.activeElement !== mcStr) {
+                if (document.activeElement !== mcStr) {
                     const sv = Number(widgetValue(node, "motion_context_strength", 1.0));
                     mcStr.value = (isFinite(sv) ? sv : 1.0).toFixed(2);
                 }
+                // a non-default strength matters enough to see at a glance
+                mcStr.style.color = Number(widgetValue(node, "motion_context_strength", 1.0)) < 1.0
+                    ? COL.green : COL.bright;
                 mcNote.style.display = mf ? "" : "none";
                 mcThumb.style.display = mf ? "" : "none";
                 if (mf) {
