@@ -4576,10 +4576,12 @@ function attachTimeline(node) {
             const mkV = () => {
                 const v = document.createElement("video");
                 v.preload = "auto";
-                v.volume = 1.0;   // full level — the point is judging the mix
+                v.volume = 1.0;   // per-clip level is applied at play time
                 Object.assign(v.style, { width: "100%", display: "none", background: "#000" });
                 return v;
             };
+            // each clip's own level, so the preview is the mix you'll export
+            const clipVol = (e) => Math.min(1, e && e.vol != null ? Number(e.vol) : 1);
             const vids = [mkV(), mkV()];
             // ♪ music bed: same mapping as the export — song time 0 (follow
             // mode) or the guide offset lands at reel time 0; resynced at every
@@ -4717,6 +4719,7 @@ function attachTimeline(node) {
                     v.style.display = "block";
                     const go = () => {
                         if (stopped) return;
+                        v.volume = clipVol(e);
                         v.play().catch(() => {});
                         syncMusic(0);
                         paintLabel();
@@ -4760,6 +4763,7 @@ function attachTimeline(node) {
                     if (stopped) return;
                     if (Math.abs(vids[0].currentTime - (e0.in || 0)) > 0.2)
                         vids[0].currentTime = e0.in || 0;
+                    vids[0].volume = clipVol(e0);
                     vids[0].play().catch(() => {});
                     syncMusic(0);
                     raf = requestAnimationFrame(tick);
@@ -5187,6 +5191,17 @@ function attachTimeline(node) {
         });
         // clearing is the one action that loses several clips' worth of
         // trims/crossfades at once, so it asks twice and is fully undoable
+        const muteAllB = el("button", btnStyle, "🔇 mute clips");
+        muteAllB.title = "silence every clip's own soundtrack in the export, in one go — for when the music bed and fx tracks carry the piece. Click again to bring them all back to 100%.";
+        muteAllB.addEventListener("click", () => {
+            const l = reelGet();
+            if (!l.length) return;
+            const anyLoud = l.some((e) => (e.vol == null ? 1 : Number(e.vol)) > 0);
+            reelSet(l.map((e) => ({ ...e, vol: anyLoud ? 0 : 1 })));
+            toast(anyLoud
+                ? "every clip's own audio muted for the export — music and fx unaffected"
+                : "clip audio restored to 100%");
+        });
         const clearB = el("button", { ...btnStyle, color: COL.red }, "✕ clear reel");
         clearB.title = "empty the chain (the files stay on disk). Asks twice, and ↩ undo brings the whole reel back — including every trim, crossfade and stored setup.";
         clearB.addEventListener("click", () => {
@@ -5254,7 +5269,8 @@ function attachTimeline(node) {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         clips: list.map((e) => ({ name: e.name, in: e.in || 0,
-                            out: e.out || 0, xfade: e.xfade || 0, mc: !!e.mc })),
+                            out: e.out || 0, xfade: e.xfade || 0, mc: !!e.mc,
+                            vol: e.vol == null ? 1 : e.vol })),
                         fade_in: fx.fadeIn || 0,
                         fade_out: fx.fadeOut || 0,
                         fps: FPS,
@@ -5352,7 +5368,7 @@ function attachTimeline(node) {
         reelCtl.append(undoB, playReelB, musicLab, musicF, musicFadeLab, musicFiF, musicFoF,
             el("span", { color: COL.text, fontSize: "11px" }, "fade in"), fadeInF,
             el("span", { color: COL.text, fontSize: "11px" }, "out"), fadeOutF,
-            reelAddB, rerollB, clearB, exportB);
+            muteAllB, reelAddB, rerollB, clearB, exportB);
         reelHead.appendChild(reelCtl);
         const reelRow = el("div", {
             display: "none", gap: "10px", padding: "8px 16px 14px", overflowX: "auto",
@@ -5680,6 +5696,43 @@ function attachTimeline(node) {
                     paintTrim();
                 });
 
+                // per-clip level for the model's own soundtrack: mute it when
+                // the music bed and fx tracks are carrying the piece
+                const volRow = el("div", { display: "flex", gap: "5px",
+                    alignItems: "center", padding: "2px 6px 0" });
+                const curVol = entry.vol == null ? 1 : Number(entry.vol);
+                const volSet = (v) => {
+                    const l = reelGet();
+                    let k = i;
+                    if (l[k]?.name !== entry.name) k = l.findIndex((e) => e.name === entry.name);
+                    if (k < 0) return;
+                    l[k] = { ...l[k], vol: Math.max(0, Math.min(2, v)) };
+                    reelSet(l);
+                };
+                const muteB = el("button", { ...btnStyle, padding: "1px 6px",
+                    fontSize: "12px", color: curVol <= 0 ? COL.red : COL.bright },
+                    curVol <= 0 ? "🔇" : "🔊");
+                muteB.title = curVol <= 0
+                    ? "this clip's own audio is muted in the export — click to bring it back"
+                    : "mute this clip's own audio in the export (music and fx tracks are unaffected)";
+                muteB.addEventListener("click", () => volSet(curVol <= 0 ? 1 : 0));
+                const volSl = el("input");
+                volSl.type = "range"; volSl.min = "0"; volSl.max = "150"; volSl.step = "5";
+                volSl.value = String(Math.round(curVol * 100));
+                Object.assign(volSl.style, { flex: "1", accentColor: COL.slider,
+                    cursor: "pointer" });
+                volSl.title = "how loud this clip's own soundtrack is in the export (0 = silent, 100 = as rendered). Applied at export only — the file is untouched.";
+                volSl.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+                volSl.addEventListener("change", () => volSet(parseInt(volSl.value, 10) / 100));
+                volSl.addEventListener("input", () => {
+                    volPct.textContent = volSl.value + "%";
+                    volPct.style.color = parseInt(volSl.value, 10) === 0 ? COL.red : COL.text;
+                });
+                const volPct = el("div", { color: curVol <= 0 ? COL.red : COL.text,
+                    fontSize: "10px", fontFamily: "monospace", minWidth: "34px",
+                    textAlign: "right" }, Math.round(curVol * 100) + "%");
+                volRow.append(muteB, volSl, volPct);
+
                 const foot = el("div", { padding: "2px 6px 5px", display: "flex",
                     flexDirection: "column", gap: "3px" });
                 const nm = entry.name.replace(/\s*\[\w+\]\s*$/, "").split("/").pop();
@@ -5748,7 +5801,7 @@ function attachTimeline(node) {
                         toast("clip removed — ↩ undo (reel header) brings it back for a few seconds");
                     }, COL.red));
                 foot.appendChild(row);
-                c.append(ro, foot);
+                c.append(ro, volRow, foot);
                 reelRow.appendChild(c);
             });
             renderSfx();   // fx lanes scale to the reel's kept duration

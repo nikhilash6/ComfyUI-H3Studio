@@ -222,9 +222,16 @@ def register():
                                        if audio["waveform"].ndim >= 2 else 1)
                 elif (fsel.shape[1], fsel.shape[2]) != (base_h, base_w):
                     fsel = _resize(fsel, base_w, base_h, "center")
+                # per-clip level: 0 mutes the model's own soundtrack, which is
+                # what you want when the music bed and fx carry the piece
+                vol = c.get("vol")
+                vol = 1.0 if vol is None else max(0.0, min(2.0, float(vol)))
+                clip_a = _clip_audio(audio, i0, i1 - i0, fps, sr, channels)
+                if vol != 1.0:
+                    clip_a = clip_a * vol
                 pieces.append({
                     "frames": fsel,
-                    "audio": _clip_audio(audio, i0, i1 - i0, fps, sr, channels),
+                    "audio": clip_a,
                     "xfade": max(0.0, float(c.get("xfade") or 0.0)),
                     # motion-continuation clips get their join brightness matched
                     # (disabled globally by LUMA_FIX_ENABLED)
