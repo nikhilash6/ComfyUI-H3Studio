@@ -51,8 +51,8 @@ from comfy_api.latest import ComfyExtension, io, InputImpl
 
 import comfy.model_management
 
-from . import (extra_conds_patch, h3_core, h3_latent_cache, h3_row_aug_patch,
-               h3_time_warp, middle_frame_patch, turbo_compat)
+from . import (extra_conds_patch, h3_core, h3_freeze, h3_latent_cache,
+               h3_row_aug_patch, h3_time_warp, middle_frame_patch, turbo_compat)
 
 try:
     from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP as _VIS_T
@@ -1248,6 +1248,26 @@ class H3StudioImageToVideo(io.ComfyNode):
                     "H3 Studio: motion context of %d frames into a %d-frame clip "
                     "-- the pinned run must be a small fraction of the timeline. "
                     "Lengthen the clip or lower motion_context_frames." % (run, frame_count))
+            # Is the run we are about to pin actually moving? A frozen tail
+            # pinned at the head makes the next clip open frozen, and the link
+            # after that pins THAT. We only warn: silently moving the cut here
+            # would disagree with the reel, which still holds the full clip, and
+            # you would see the freeze play and then jump backwards. The editor
+            # scans on add-to-reel and moves the card's out-trim instead, so the
+            # export and the handover follow one number. See h3_freeze.
+            try:
+                fz = h3_freeze.analyse(mc_frames[max(0, cut - run):cut])
+                if fz["frozen"]:
+                    at = max(0, cut - run) + fz["freeze_start"]
+                    logging.warning(
+                        "H3Studio: the %d frames being pinned are frozen from "
+                        "frame %d (%.2fs) -- %s. The next clip will open on a "
+                        "still. Trim %r back to about %.2fs and continue from "
+                        "there (the editor's reel does this for you).",
+                        run, at, at / FPS_HINT, h3_freeze.describe(fz),
+                        mc_file, at / FPS_HINT)
+            except Exception:
+                logging.debug("H3Studio: freeze scan skipped", exc_info=True)
             # Best case: this clip is the render we just made and its latent is
             # still in the session cache -- pin THAT instead of decoding the
             # file and re-encoding it. Skips a full VAE round trip per link,

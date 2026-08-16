@@ -1804,6 +1804,42 @@ function attachTimeline(node) {
         if (list[list.length - 1]?.name === name) return;   // no immediate dupes
         list.push({ name, in: 0, out: 0, xfade: 0 });
         reelSet(list);
+        freezeTrim(name);
+    }
+
+    // H3 clips often stop moving before they end — with a last frame the model
+    // reaches it early and holds, and a shot tends to settle regardless. That
+    // tail is the worst possible thing to continue FROM: pinned at the next
+    // clip's head it makes the next clip open on a still, and the link after
+    // that pins the still in turn.
+    //
+    // The out-trim is the one number that fixes both halves, which is why this
+    // runs here rather than in the node: the export drops the frozen tail, and
+    // ⏭▶ reads the same out-trim as motion_context_end_seconds, so the next
+    // clip takes its history from before the freeze. Moving only the handover
+    // would leave the export playing the freeze and then jumping backwards.
+    //
+    // Advisory: it only ever sets an out-trim the card does not already have,
+    // and the card shows it, so a wrong call is one drag to undo.
+    async function freezeTrim(name) {
+        let info;
+        try {
+            const r = await api.fetchApi("/h3studio/freeze_scan", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, fps: FPS }),
+            });
+            info = await r.json();
+        } catch (e) { return; }
+        if (!info || info.error || !info.frozen || !(info.seconds > 0)) return;
+        const list = reelGet();
+        const i = list.findIndex((e) => e.name === name);
+        if (i < 0 || list[i].out > 0) return;   // never override a chosen trim
+        list[i] = { ...list[i], out: info.seconds };
+        reelSet(list);
+        toast(`clip ${i + 1} stops moving at ${info.seconds.toFixed(2)}s — `
+            + `out-trim set there so the freeze is dropped and the next clip `
+            + `continues from live motion (adjust on the card if you disagree)`);
     }
 
     // motion context (⏭▶): the whole previous-clip tail pinned at the new

@@ -31,6 +31,15 @@ except Exception as exc:
     logging.warning("H3Studio: reel export skipped (%s: %s)",
                     type(exc).__name__, exc)
 
+# frozen-tail scan for the reel (no-op headless)
+try:
+    from . import h3_freeze
+
+    h3_freeze.register()
+except Exception as exc:
+    logging.warning("H3Studio: freeze scan endpoint skipped (%s: %s)",
+                    type(exc).__name__, exc)
+
 # Openverse free image/audio search proxy (no-op headless)
 try:
     from . import h3_web_media  # noqa: F401  (registers its routes at import)

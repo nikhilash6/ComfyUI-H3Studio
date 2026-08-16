@@ -105,6 +105,26 @@ The MOTION bar carries the dials: how many frames to pin, **⚡ latent reuse**
 it, which is what stops quality compounding down a chain), and **⚖ anchor
 brightness** if a long chain starts to drift.
 
+### …stop a chain inheriting a frozen ending
+H3 clips often stop moving before they end — with a last frame the model reaches
+it early and then holds it, and a shot tends to settle regardless. That tail is
+the worst possible thing to continue *from*: pinned at the next clip's head it
+makes the next clip open on a still, and the link after that pins the still in
+turn.
+
+When a clip joins the reel it is now scanned, and if it locks up the card's
+**out-trim is set to where the motion stops**. That one number fixes both halves
+— the export drops the frozen tail, and **⏭▶** reads the same out-trim, so the
+next clip takes its history from live motion. It never overrides a trim you set
+yourself, and the card shows it, so a wrong call is one drag to undo.
+
+It is deliberately not a motion threshold. H3 *decelerates* as it converges on
+its ending, so "low motion" fires during the slow-down and throws away good
+footage. Instead each frame is compared against a pixel-wise median of the final
+frames — the question is "has this frame already arrived at the ending", not "is
+it moving". Approach credit:
+[Herrgotts-H3-Infinite-Continuation-Suite](https://github.com/HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite).
+
 ### …check whether a join actually worked
 Add **H3 Seam Probe** and give it this clip's audio *before* the trim, the audio
 of the clip it continues, and the same frame count you pinned. It measures four
