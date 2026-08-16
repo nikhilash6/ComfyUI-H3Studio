@@ -3273,7 +3273,22 @@ function attachTimeline(node) {
             showPanel("rendering…");
         };
         const showResult = (name, isVideo) => {
+            // The pinned span, plus the ONE transition frame after it.
+            //
+            // The pinned run ends on a latent-step boundary, so the first free
+            // step's opening frame is decoded with the pinned step as its
+            // temporal context and comes out at the CONTEXT's exposure, not the
+            // one the model settles on. Measured on two chains: last pinned
+            // 0.3105, first free 0.3067, next frame 0.2847 -- the transition
+            // frame sits with the head, then the picture steps.
+            //
+            // Trimming to the pinned span alone therefore opens every continued
+            // clip on that one hybrid frame, which reads as a FLASH at the join
+            // rather than the (much less visible) exposure step underneath it.
+            // Dropping it costs 1/24 s and turns a flash into a step. The in-trim
+            // is in seconds, so the audio follows it.
             const renderedSpan = run.mcSpan;   // captured at queue time
+            const trimSpan = renderedSpan > 0 ? renderedSpan + 1 : 0;
             const renderedAt = Number(run.guideAt) || 0;   // …and its song position
             stopVideosIn(resBody, true);
             stopDockMusic();
@@ -3298,7 +3313,7 @@ function attachTimeline(node) {
                     dockMusic.volume = Math.min(1, Number(gm2.level));
                     const syncTo = () => {
                         if (!dockMusic) return;
-                        const want = off + Math.max(0, v.currentTime - (renderedSpan / FPS));
+                        const want = off + Math.max(0, v.currentTime - (trimSpan / FPS));
                         if (Math.abs(dockMusic.currentTime - want) > 0.25)
                             dockMusic.currentTime = want;
                     };
@@ -3316,7 +3331,7 @@ function attachTimeline(node) {
                     // a motion-context render opens by repeating the pinned tail
                     // (that IS the context) — preview the clip as it will appear
                     // after the reel's auto-trim, not the raw file
-                    const head = renderedSpan / FPS;
+                    const head = trimSpan / FPS;
                     v.addEventListener("loadedmetadata", () => { v.currentTime = head; });
                     v.addEventListener("timeupdate", () => {
                         if (v.currentTime < head - 0.04) v.currentTime = head;
@@ -3357,12 +3372,12 @@ function attachTimeline(node) {
                             // it non-destructively. The join luma-match is NOT
                             // armed here: it alters picture, so it stays opt-in
                             // per clip (✨ in the ✂ popup).
-                            if (!(e2.in > 0)) e2.in = renderedSpan / FPS;
+                            if (!(e2.in > 0)) e2.in = trimSpan / FPS;
                         }
                         reelSet(l);
                         soundtrackForClip(e2, atStart, renderedAt);
                         if (renderedSpan > 0)
-                            toast(`added — in-trim auto-set to ${(renderedSpan / FPS).toFixed(2)}s `
+                            toast(`added — in-trim auto-set to ${(trimSpan / FPS).toFixed(2)}s `
                                 + `to drop the repeated context head (adjust on the card if you like)`);
                     }
                     state.reelTarget = null;   // adding as new consumes the replace intent
@@ -3389,7 +3404,7 @@ function attachTimeline(node) {
                         // keeps the card's own ✨ choice; only the trim follows
                         // the new take
                         l[i] = { ...l[i], name, setup: runSetup || l[i].setup,
-                            in: renderedSpan > 0 ? renderedSpan / FPS : 0, out: 0 };
+                            in: trimSpan > 0 ? trimSpan / FPS : 0, out: 0 };
                         reelSet(l);
                         state.reelTarget = null;
                         repB.textContent = "✓ replaced";
@@ -3408,7 +3423,7 @@ function attachTimeline(node) {
                 // VRAM pager no room to settle — the observed "Fault failed"
                 // crashes. Record the result; onDone does the work.
                 if (auto.on && !run.autoAdvanced) {
-                    run.autoResult = { name, runSetup, renderedSpan, reelB };
+                    run.autoResult = { name, runSetup, renderedSpan, trimSpan, reelB };
                 }
                 if (renderedSpan > 0)
                     resFoot.append(el("span", {
@@ -3744,7 +3759,7 @@ function attachTimeline(node) {
             if (e3?.name === r.name) {
                 if (r.runSetup) e3.setup = r.runSetup;
                 // head trim yes, luma-match no — see the manual add path
-                if (r.renderedSpan > 0 && !(e3.in > 0)) e3.in = r.renderedSpan / FPS;
+                if (r.trimSpan > 0 && !(e3.in > 0)) e3.in = r.trimSpan / FPS;
                 reelSet(l);
             }
             if (r.reelB) { r.reelB.textContent = "✓ in reel"; r.reelB.disabled = true; }
