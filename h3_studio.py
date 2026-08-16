@@ -52,7 +52,7 @@ from comfy_api.latest import ComfyExtension, io, InputImpl
 import comfy.model_management
 
 from . import (extra_conds_patch, h3_latent_cache, h3_row_aug_patch,
-               middle_frame_patch, turbo_compat)
+               h3_time_warp, middle_frame_patch, turbo_compat)
 
 try:
     from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP as _VIS_T
@@ -793,6 +793,10 @@ class H3StudioImageToVideo(io.ComfyNode):
                     tooltip="EXPERIMENTAL, off by default. Stops a chain's brightness drifting, by correcting the CONDITIONING instead of the finished pixels.\n\nThe pinned context is what the model matches, so before pinning it the node measures what the previous render actually came out at (read straight from its latent -- no decode) and nudges the context by the error against the chain's anchor, taken from its first link. Nothing assumes how much a link drifts: 0.5% drift gets a 0.5% correction, 4% gets 4%, and if the model only partly follows the nudge the residue is corrected next link -- it converges instead of accumulating.\n\nCosts nothing (an add on a tensor already in memory), never touches finished pixels (so no clipped highlights and no clip paying for the ones before it), and it fixes the render FILES, not just the export. Clamped to +-0.08 so a deliberate lighting change isn't fought. Needs motion_context_reuse_latent; clear the reel to re-anchor.\n\nWhile it's off, nothing about the render changes."),
                 io.Float.Input("motion_context_strength", default=0.92, min=0.0, max=1.0, step=0.01,
                     tooltip="How hard the pinned context frames are enforced.\n\n1.0 is ground truth: the model reproduces them exactly. Seamless -- and it also copies any artifact they carry, so blockiness compounds down a chain (measured: a 16px grid climbing to +21% over six links, every link worse than the last).\n\nBelow 1.0 the pinned rows are read as a reference at that noise level rather than clean content, so the model REGENERATES the region guided by the previous clip instead of duplicating it. Motion, framing and colour carry over; accumulated artifacts don't. 0.92 is the default because it was measured to flatten that grid completely -- the same six-link test ended BELOW its first clip, and a one-off bad frame self-corrected in a single link instead of propagating. Below ~0.7 the join itself starts to drift.\n\nUses the same flow-blend and per-row timestep labelling as the keyframe strength dials."),
+                io.Float.Input("motion_scale", default=1.0, min=0.1, max=4.0, step=0.05,
+                    tooltip="EXPERIMENTAL. How much motion the clip contains, as a direct dial rather than a hint.\n\nEvery other motion control describes what should happen. This one rescales the model's CLOCK: the video's RoPE time coordinates carry a fixed amount of time between frames, and widening those gaps tells the model more time passes -- so more has to change. Content, prompt and keyframes are untouched.\n\n1.0 = stock, and the timeline is left byte-for-byte alone. 1.3 packs about a third more movement into the same frames; 0.7 slows the whole clip down. Roughly 0.8-1.3 stays close to what the model was trained on; further out is increasingly a guess.\n\nNote the soundtrack is NOT rescaled, so audio drifts against the picture as you move away from 1.0."),
+                io.String.Input("motion_curve", multiline=True, default="",
+                    tooltip="OPTIONAL, needs no motion_scale. Vary the speed ACROSS the clip instead of applying one value to all of it -- one line per control point:\n\n    position, speed\n\nposition is a fraction of the clip (0.5 = halfway) or an absolute frame number above 1.0. speed is the same dial as motion_scale, at that moment. Between two points the speed ramps linearly; before the first and after the last it is held flat.\n\nExample -- settle, then accelerate away:\n    0.0, 0.6\n    0.5, 0.8\n    1.0, 1.8\n\nSpeeds multiply with motion_scale, so leave that at 1.0 unless you want to push the whole curve at once. Speeding a section up also pushes everything after it later in the clip's time -- that is what a time axis does. Lines starting with # are ignored."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -901,6 +905,7 @@ class H3StudioImageToVideo(io.ComfyNode):
                 motion_context_anchor_brightness=False, motion_context_strength=0.92,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
+                motion_scale=1.0, motion_curve="",
                 first_frame=None, last_frame=None, middle_frames=None,
                 ref_images=None, ref_masks=None, ref_audios=None,
                 ref_videos=None, ref_video_audios=None,
@@ -1570,6 +1575,21 @@ class H3StudioImageToVideo(io.ComfyNode):
         if text_beats:
             cond = node_helpers.conditioning_set_values(cond,
                                                         {"minimax_text_beats": text_beats})
+
+        # Motion timing. parse returns None for the identity, so a stock render never
+        # installs the patch and never carries the key.
+        warp = h3_time_warp.parse_motion_curve(motion_curve, frame_count, motion_scale)
+        if warp is not None:
+            if not extra_conds_patch.install():
+                raise RuntimeError(
+                    "H3 Studio: motion_scale / motion_curve need the extra_conds "
+                    "patch, which could not be installed. See the log. Set "
+                    "motion_scale back to 1.0 and clear motion_curve to render "
+                    "without them.")
+            logging.info("H3Studio: motion timing -- %s.",
+                         h3_time_warp.describe(warp, frame_count, FPS_HINT))
+            cond = node_helpers.conditioning_set_values(cond,
+                                                        {"minimax_time_warp": warp})
 
         if keyframes:
             for kf in keyframes:

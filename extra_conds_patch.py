@@ -17,6 +17,12 @@ would each capture the other as "the original" and refuse to install).
 
 2. TIMED TEXT. Relocates spans of prompt text onto the video timeline. See the
    module docstring notes on apply_text_beats below.
+
+3. TIME WARP. Rescales the target video's RoPE clock to dial motion up or down.
+   See h3_time_warp. Everything anchored to a frame index lives on that same axis,
+   so the warp table is threaded through the relocations below as well -- otherwise
+   a keyframe pinned at frame k stays at the old coordinate while the frame it was
+   pinning moves out from under it.
 """
 
 import logging
@@ -26,7 +32,14 @@ import torch
 import comfy.ldm.minimax.model as _mmm
 import comfy.model_base as _mb
 
+from . import h3_time_warp
+
 _orig_extra_conds = _mb.MiniMaxH3.extra_conds
+
+
+def _wf(warp, frame):
+    """A frame index in warped time (identity when no warp is in play)."""
+    return h3_time_warp.warp_at(warp, frame) if warp else float(frame)
 
 
 # --- 1. reference / keyframe coexistence -----------------------------------
@@ -67,11 +80,11 @@ def _video_time_origin(layout):
     return None
 
 
-def re_anchor_keyframes(layout, keyframes):
+def re_anchor_keyframes(layout, keyframes, warp=None):
     """Re-write cond-segment time anchors relative to the true video origin.
 
-    With no refs the origin equals text_len and this reproduces core's own
-    values exactly, so it is safe to run whenever keyframes exist. Returns the
+    With no refs and no warp the origin equals text_len and this reproduces core's
+    own values exactly, so it is safe to run whenever keyframes exist. Returns the
     number of segments moved.
     """
     origin = _video_time_origin(layout)
@@ -81,7 +94,8 @@ def re_anchor_keyframes(layout, keyframes):
     if len(conds) != len(keyframes):
         return 0  # layout shape drifted; leave core's values alone
     for (a, b), kf in zip(conds, keyframes):
-        layout.position_ids[a:b, 0] = origin + _mmm.FRAME_RESCALE * float(kf["resolved_frame_index"])
+        layout.position_ids[a:b, 0] = origin + _mmm.FRAME_RESCALE * _wf(
+            warp, kf["resolved_frame_index"])
     return len(conds)
 
 
@@ -90,7 +104,7 @@ def re_anchor_keyframes(layout, keyframes):
 MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
 
 
-def relocate_context_audio(layout, refs):
+def relocate_context_audio(layout, refs, warp=None):
     """Translate the motion-context audio ref's time coordinates onto the target
     timeline, so its window ENDS where the pinned video ends (the join).
 
@@ -142,7 +156,9 @@ def relocate_context_audio(layout, refs):
                         ordinal, len(audio_segs))
         return 0
     a, b = audio_segs[ordinal]
-    end_frame = float(blk[MC_AUDIO_END_KEY])
+    # the join is a FRAME, so it follows the warp -- the audio window has to end
+    # where the pinned video now ends, not where it used to
+    end_frame = _wf(warp, float(blk[MC_AUDIO_END_KEY]))
     t0 = float(layout.position_ids[a:b, 0].min())
     shift = (origin + _mmm.FRAME_RESCALE * end_frame - rt) - t0
     layout.position_ids[a:b, 0] += shift
@@ -151,7 +167,7 @@ def relocate_context_audio(layout, refs):
 
 # --- 2. timed text ---------------------------------------------------------
 
-def apply_text_beats(layout, beats):
+def apply_text_beats(layout, beats, warp=None):
     """Relocate recorded text spans onto the video timeline. Returns spans moved.
 
     Text normally sits at t = 0 .. text_len-1 and the video timeline starts at
@@ -184,7 +200,7 @@ def apply_text_beats(layout, beats):
             logging.warning("H3Studio: timed-text span [%d,%d) outside the %d-token "
                             "text run; skipping.", start, stop, text_len)
             continue
-        base = origin + _mmm.FRAME_RESCALE * float(beat["frame_index"])
+        base = origin + _mmm.FRAME_RESCALE * _wf(warp, beat["frame_index"])
         n = stop - start
         layout.position_ids[text_start + start:text_start + stop, 0] = (
             base + torch.arange(n, dtype=torch.float64))
@@ -216,11 +232,19 @@ def _patched_extra_conds(self, **kwargs):
 
     layout0 = payload.get("layout")
     keyframes = payload.get("keyframes")
+    # the clock is rescaled first: everything below anchors to frame indices on it
+    warp = kwargs.get("minimax_time_warp")
+    if warp and layout0 is None:
+        logging.warning("H3Studio: no prebuilt layout, motion timing left at stock "
+                        "for this run.")
+        warp = None
+    elif warp:
+        h3_time_warp.apply_video_warp(layout0, warp)
     if layout0 is not None and keyframes:
-        re_anchor_keyframes(layout0, keyframes)
+        re_anchor_keyframes(layout0, keyframes, warp)
     all_refs = payload.get("refs") or []
     if layout0 is not None and all_refs:
-        relocate_context_audio(layout0, all_refs)
+        relocate_context_audio(layout0, all_refs, warp)
 
     beats = kwargs.get("minimax_text_beats")
     if beats:
@@ -231,7 +255,7 @@ def _patched_extra_conds(self, **kwargs):
             logging.warning("H3Studio: no prebuilt layout, timed-text anchoring "
                             "skipped for this run.")
         else:
-            apply_text_beats(layout, beats)
+            apply_text_beats(layout, beats, warp)
     return out
 
 

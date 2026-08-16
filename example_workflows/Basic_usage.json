@@ -1,8 +1,8 @@
 {
   "id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
   "revision": 0,
-  "last_node_id": 161,
-  "last_link_id": 349,
+  "last_node_id": 162,
+  "last_link_id": 350,
   "nodes": [
     {
       "id": 127,
@@ -43,7 +43,11 @@
       "widgets_values": [
         "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
         "default"
-      ]
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
     },
     {
       "id": 129,
@@ -77,7 +81,11 @@
       "widgets_values": [
         310446414269910,
         "randomize"
-      ]
+      ],
+      "widgets_values_named": {
+        "noise_seed": 310446414269910,
+        "control_after_generate": "randomize"
+      }
     },
     {
       "id": 120,
@@ -118,7 +126,10 @@
       },
       "widgets_values": [
         "minimax_h3_audio_vae_fp32.safetensors"
-      ]
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
     },
     {
       "id": 128,
@@ -160,7 +171,12 @@
         "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         "minimax",
         "default"
-      ]
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
     },
     {
       "id": 119,
@@ -201,7 +217,10 @@
       },
       "widgets_values": [
         "minimax_h3_video_vae_fp16.safetensors"
-      ]
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
     },
     {
       "id": 141,
@@ -243,7 +262,12 @@
         "minimax\\minimax_h3_turbo_v4_step600.safetensors",
         0.75,
         false
-      ]
+      ],
+      "widgets_values_named": {
+        "lora_name": "minimax\\minimax_h3_turbo_v4_step600.safetensors",
+        "strength": 0.75,
+        "low_vram": false
+      }
     },
     {
       "id": 126,
@@ -284,8 +308,7 @@
         "cnr_id": "comfy-core",
         "ver": "0.30.0",
         "Node name for S&R": "BasicGuider"
-      },
-      "widgets_values": []
+      }
     },
     {
       "id": 153,
@@ -323,44 +346,20 @@
         }
       ],
       "properties": {
+        "cnr_id": "comfyui-h3studio",
+        "ver": "d66e954815b444d89f5bca22e9cf3267f9b5de57",
         "Node name for S&R": "H3BasicScheduler"
       },
       "widgets_values": [
         "simple",
         6,
         "slice (core)"
-      ]
-    },
-    {
-      "id": 160,
-      "type": "MiniMaxH3TurboSampler",
-      "pos": [
-        -383.2308424568426,
-        3966.8264193408377
       ],
-      "size": [
-        280.2447265625,
-        26
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "SAMPLER",
-          "type": "SAMPLER",
-          "links": [
-            341
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-minimax-h3-turbo",
-        "ver": "a7624b4c00626a8ae7e78860769389d706565190",
-        "Node name for S&R": "MiniMaxH3TurboSampler"
-      },
-      "widgets_values": []
+      "widgets_values_named": {
+        "scheduler": "simple",
+        "steps": 6,
+        "denoise_mode": "slice (core)"
+      }
     },
     {
       "id": 125,
@@ -390,7 +389,7 @@
         {
           "name": "sampler",
           "type": "SAMPLER",
-          "link": 341
+          "link": 350
         },
         {
           "name": "sigmas",
@@ -422,8 +421,7 @@
         "cnr_id": "comfy-core",
         "ver": "0.30.0",
         "Node name for S&R": "SamplerCustomAdvanced"
-      },
-      "widgets_values": []
+      }
     },
     {
       "id": 122,
@@ -466,8 +464,7 @@
         "cnr_id": "comfy-core",
         "ver": "0.30.0",
         "Node name for S&R": "VAEDecode"
-      },
-      "widgets_values": []
+      }
     },
     {
       "id": 121,
@@ -510,8 +507,7 @@
         "cnr_id": "comfy-core",
         "ver": "0.30.0",
         "Node name for S&R": "VAEDecodeAudio"
-      },
-      "widgets_values": []
+      }
     },
     {
       "id": 130,
@@ -557,7 +553,11 @@
       "widgets_values": [
         24,
         8
-      ]
+      ],
+      "widgets_values_named": {
+        "fps": 24,
+        "bit_depth": 8
+      }
     },
     {
       "id": 92,
@@ -568,7 +568,7 @@
       ],
       "size": [
         1978.2277380225569,
-        1210.7531026376882
+        106
       ],
       "flags": {},
       "order": 15,
@@ -596,7 +596,12 @@
         "video/MiniMax_H3",
         "auto",
         "auto"
-      ]
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "video/MiniMax_H3",
+        "format": "auto",
+        "codec": "auto"
+      }
     },
     {
       "id": 161,
@@ -610,7 +615,7 @@
         88
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -618,6 +623,9 @@
       "widgets_values": [
         "CLICK HERE TO THE RIGHT TO OPEN THE EDITOR ---->"
       ],
+      "widgets_values_named": {
+        "text": "CLICK HERE TO THE RIGHT TO OPEN THE EDITOR ---->"
+      },
       "color": "#432",
       "bgcolor": "#653"
     },
@@ -743,6 +751,8 @@
         }
       ],
       "properties": {
+        "cnr_id": "comfyui-h3studio",
+        "ver": "d66e954815b444d89f5bca22e9cf3267f9b5de57",
         "Node name for S&R": "H3StudioImageToVideo",
         "h3_widget_values": {
           "prompt": "a man with a horse head riding a bike on a busy road.  Tracking shot from in front of the bike, bike facing the camera..",
@@ -785,7 +795,9 @@
           "v2v_noise_declare": 1,
           "motion_context_reuse_latent": true,
           "motion_context_anchor_brightness": false,
-          "motion_context_strength": 0.92
+          "motion_context_strength": 0.92,
+          "motion_scale": 1,
+          "motion_curve": ""
         }
       },
       "widgets_values": [
@@ -830,10 +842,96 @@
         true,
         false,
         0.92,
-        null,
+        1,
+        "",
+        "",
         null,
         ""
-      ]
+      ],
+      "widgets_values_named": {
+        "prompt": "a man with a horse head riding a bike on a busy road.  Tracking shot from in front of the bike, bike facing the camera..",
+        "width": 1024,
+        "height": 576,
+        "length": 73,
+        "first_frame_strength": 1,
+        "last_frame_strength": 1,
+        "first_frame_file": "",
+        "last_frame_file": "",
+        "middle_frame_files": "",
+        "ref_image_files": "",
+        "ref_video_spec": "",
+        "ref_video_files": "",
+        "ref_video_megapixels": 0,
+        "ref_audio_files": "",
+        "first_frame_crop": "",
+        "last_frame_crop": "",
+        "middle_frame_crops": "",
+        "ref_image_crops": "",
+        "middle_frame_spec": "",
+        "timed_text": "",
+        "timed_text_mode": "text only",
+        "ref_spec": "",
+        "ref_image_size": "match",
+        "ref_megapixels": 0,
+        "ref_audio_strength": 1,
+        "mask_ref_pixels": false,
+        "ref_video_crops": "",
+        "v2v_video_file": "",
+        "v2v_start_seconds": 0,
+        "v2v_end_seconds": 0,
+        "v2v_denoise": 0.55,
+        "v2v_crop": "",
+        "motion_context_file": "",
+        "motion_context_end_seconds": 0,
+        "motion_context_frames": 22,
+        "motion_context_audio_frames": 22,
+        "v2v_noise": 0,
+        "v2v_noise_declare": 1,
+        "motion_context_reuse_latent": true,
+        "motion_context_anchor_brightness": false,
+        "motion_context_strength": 0.92,
+        "motion_scale": 1,
+        "motion_curve": "",
+        "⤢ open timeline editor": "",
+        "✎ raw text specs": null,
+        "h3_timeline": ""
+      }
+    },
+    {
+      "id": 162,
+      "type": "KSamplerSelect",
+      "pos": [
+        -511.39885279810716,
+        3870.8528898312115
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": [
+            350
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "res_multistep"
+      ],
+      "widgets_values_named": {
+        "sampler_name": "res_multistep"
+      }
     }
   ],
   "links": [
@@ -966,14 +1064,6 @@
       "CONDITIONING"
     ],
     [
-      341,
-      160,
-      0,
-      125,
-      2,
-      "SAMPLER"
-    ],
-    [
       342,
       127,
       0,
@@ -996,21 +1086,29 @@
       153,
       0,
       "MODEL"
+    ],
+    [
+      350,
+      162,
+      0,
+      125,
+      2,
+      "SAMPLER"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
-    "frontendVersion": "1.48.7",
+    "frontendVersion": "1.49.6",
     "VHS_latentpreview": false,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
     "VHS_KeepIntermediate": true,
     "ds": {
-      "scale": 0.5559917313492586,
+      "scale": 0.37974983358326514,
       "offset": [
-        3971.142989881464,
-        -3670.835498888986
+        3832.1686673411496,
+        -3265.3993382866342
       ]
     }
   },

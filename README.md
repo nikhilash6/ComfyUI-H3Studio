@@ -183,8 +183,32 @@ centre-cropped — the card warns you which edges are going.
 pick a speed curve, and it places tween waypoints along it. **▶ preview move**
 shows the exact move before you spend a single sampling step.
 
+### …dial the motion up or down — EXPERIMENTAL
+Every other control here describes *what* should happen. **motion_scale** changes
+the model's **clock** instead — the time it believes passes between frames — so
+the same content has to cover more or less movement. `1.0` is stock, `1.3` is
+livelier, `0.7` calms a clip down. **motion_curve** does the same thing but
+varying across the clip: `position, speed` on each line, ramped between the
+points you give, for a shot that settles and then accelerates.
+
+Stay near `0.8–1.3`. Further out drifts away from anything the model was trained
+on, and the soundtrack is *not* rescaled, so picture and sound pull apart the
+further you go from `1.0`. At exactly `1.0` with an empty curve nothing is
+touched at all.
+
+> **These two are new and may not stay.** They are the least proven controls in
+> the pack — the geometry is sound and everything anchored to a frame (keyframes,
+> beats, motion-context joins) travels with the clock correctly, but whether the
+> model *reads* a stretched clock as "more happens here" is the open question. If
+> you try them, please say what you saw in the
+> [issues](https://github.com/shootthesound/ComfyUI-H3Studio/issues).
+
 ### …make it faster
-The example workflow already uses the **turbo LoRA** at 6 steps. Beyond that,
+The example workflow already uses the **turbo LoRA** at 6 steps. It samples
+through core's own **KSamplerSelect**, *not* the special sampler node that ships
+alongside the turbo LoRA loader — recent ComfyUI builds don't need that node and
+give better results without it. If you are carrying an older copy of the
+workflow, swap it for KSamplerSelect. Beyond that,
 reference *video* is the expensive part — every frame's rows ride every sampling
 step. Cap it with **video refs MP** (`0.4` is a good start). The references
 header shows a live cost meter.
@@ -227,6 +251,9 @@ header shows a live cost meter.
   ComfyUI-H3-Motion-Context in the same session — pick one pack.
 - **Above `1.0` strength is unclamped** and off-distribution. It is there
   because sometimes you want it. It can also blow out the ending.
+- **`motion_scale` / `motion_curve` are experimental and may be removed.** They
+  rescale the RoPE time axis, which is off-distribution the moment you leave
+  `1.0`, and audio is deliberately left on the original clock.
 - Inherits every stock H3 constraint: batch size 1, frame counts snap to the
   17k+5 grid at 24fps, trained range roughly 124–362 frames.
 - **Timeline thumbnails are best-effort** — they come from the upstream node's

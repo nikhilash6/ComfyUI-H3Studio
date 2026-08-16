@@ -22,6 +22,9 @@ Set the **last frame** card. Strength `1.0` = land exactly on it; `0.6–0.8` = 
 ### I want to describe what happens at a moment (no image)
 Click the **beats lane** under the track at the right moment, type the text — that's a **beat**. Leave `timed_text_mode` on `text only` first; try the rope modes only if plain timing doesn't steer. (A beat can be upgraded to a waypoint later — right-click it.)
 
+### I want more (or less) motion, without changing what happens
+`motion_scale` on the node. Every other control describes what should happen; this one rescales the model's **clock** — the time it believes passes between frames — so the same content has to cover more or less movement. `1.0` is stock and leaves the timeline untouched, `1.3` is noticeably livelier, `0.7` calms a clip down. Stay near `0.8–1.3`; past that it drifts away from anything the model was trained on. For a clip that settles then accelerates, use `motion_curve` instead — `position, speed` per line, ramped between the points you give. The soundtrack is *not* rescaled, so picture and sound drift apart the further you go from `1.0`. EXPERIMENTAL.
+
 ### I want the same person in every clip
 Add their photos with **+ reference** (strength `1.0` locks identity, `0.7` = likeness hint). Then **🎭 cast** → **💾 save cast member** once — from any other clip or workflow, **🎭 cast** → add, and their refs, strengths and face-crops come back in one click.
 
