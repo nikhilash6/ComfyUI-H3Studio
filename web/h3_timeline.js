@@ -3834,9 +3834,19 @@ function attachTimeline(node) {
                 setTimeout(() => { if (auto.on) doQueue(); }, AUTO_RETRY_MS);
             });
         };
+        // The pinned head is usually the run we asked for, but a mid-clip
+        // handover gets extended back to a latent-step boundary and only python
+        // knows by how much (it depends on the cached latent's phase). It says
+        // so during the run; trust that over our own queue-time estimate,
+        // because the estimate would leave the extra repeated frames in the clip.
+        const onHead = (e) => {
+            const n = Number(e?.detail?.frames);
+            if (Number.isFinite(n) && n > 0) run.mcSpan = n;
+        };
         const apiEvents = [["execution_start", onExecStart], ["progress", onProgress],
             ["b_preview", onPreview], ["executed", onExecuted],
-            ["execution_success", onDone], ["execution_error", onExecError]];
+            ["execution_success", onDone], ["execution_error", onExecError],
+            ["h3studio.head", onHead]];
         for (const [ev, fn] of apiEvents) api.addEventListener(ev, fn);
         stats.appendChild(qWrap);   // defined after the stats row is assembled
         const swapBtn = el("button", btnStyle, "⇄ reverse");

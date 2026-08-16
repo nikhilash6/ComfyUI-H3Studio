@@ -801,6 +801,22 @@ def flow_blend(z, a, seed):
     return a * z + (1.0 - a) * noise.to(z.device)
 
 
+def _announce_head(span):
+    """Tell the editor how many frames of this render actually repeat the source.
+
+    Only needed when it differs from what the widgets imply -- a phase-extended
+    run. Best effort: headless, or a frontend that is not listening, simply
+    misses it and falls back to its own estimate.
+    """
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync("h3studio.head", {"frames": int(span)})
+    except Exception:
+        logging.debug("H3Studio: could not announce the head length",
+                      exc_info=True)
+
+
 def row_aug_ready():
     """Per-row labels need BOTH halves, so both are asked for here.
 
@@ -1357,6 +1373,11 @@ class H3StudioImageToVideo(io.ComfyNode):
                         "handovers rarely land on one. The extra %.2fs is head "
                         "that gets trimmed, not lost content.",
                         run, span, (span - run) / FPS_HINT)
+                # The editor predicts the head trim from the widgets at QUEUE
+                # time, but the extension is only decidable here, against the
+                # cached latent's phase. Tell it, or it trims the requested run
+                # and leaves the rest of the repeated head in the delivered clip.
+                _announce_head(span)
             else:
                 # snap BEFORE slicing: encoding an off-grid count would make the VAE
                 # keep the FIRST covered frames of the slice, ending the pinned run
