@@ -287,23 +287,34 @@ def mc_slice_from_latent(entry, run, cut_frame):
     n_steps = next((n for n in range(1, T + 1) if mc_pixel_frames(n) == run), None)
     if n_steps is None or n_steps > T:
         return None
-    # which step covers the last frame we're continuing from
-    ends, acc = [], 0
+    starts, ends, acc = [], [], 0
     for k in range(T):
+        starts.append(acc)
         acc += MC_FRAME_PER_TOKEN[k % 5]
         ends.append(acc - 1)           # last pixel frame this step covers
-    target = min(max(0, int(cut_frame) - 1), ends[-1])
-    j = next(k for k in range(T) if ends[k] >= target)
-    i0 = j - n_steps + 1
-    if i0 < base or j >= T:
+    # END AT OR BEFORE THE CUT. Taking the step that CONTAINS the cut overshoots
+    # it by up to 3 frames -- which quietly pins footage from after the handover,
+    # and with a freeze-trimmed cut that is exactly the frozen material the trim
+    # existed to avoid.
+    j = max((k for k in range(T) if ends[k] <= int(cut_frame) - 1), default=None)
+    if j is None:
+        return None
+    # START ON PHASE 0. A latent step's content is a window of pixel frames whose
+    # width depends on its phase, so a run starting at phase 3 tiles time as
+    # (4,4,1,4,4,...) while the target the model is filling tiles it as
+    # (1,4,4,4,4,...). Pinning one against the other hands the model latents whose
+    # windows are offset from the ones it would produce at those coordinates.
+    # Extending the run back to a phase-0 boundary makes the two tilings identical.
+    # It pins more frames than asked for; those come off the delivered head, which
+    # is a repeat of the source anyway, and the alternative -- moving the handover
+    # earlier instead -- would spend real footage from the previous clip.
+    # (phase_aligned_extended in Herrgotts-H3-Infinite-Continuation-Suite.)
+    i0 = ((j - n_steps + 1) // 5) * 5
+    if i0 < base or i0 < 0 or j >= T:
         return None                    # outside the cached tail
     blocks = [lat[:, :, k - base:k - base + 1] for k in range(i0, j + 1)]
-    # offsets from the sliced steps' own phases, rebased to 0
-    offs, a = [], 0
-    for k in range(i0, j + 1):
-        offs.append(a)
-        a += MC_FRAME_PER_TOKEN[k % 5]
-    return blocks, offs, a
+    offs = [starts[k] - starts[i0] for k in range(i0, j + 1)]
+    return blocks, offs, ends[j] - starts[i0] + 1
 
 
 def parse_ref_spec(spec, count, field="ref_spec"):
@@ -1335,6 +1346,17 @@ class H3StudioImageToVideo(io.ComfyNode):
                 logging.info("H3Studio: motion context taken straight from "
                              "the cached latent — no VAE round trip this link "
                              "(%d steps, %d frames).", len(blocks), span)
+                if span > run:
+                    # not a fault: the run was extended back to a phase-0
+                    # boundary so its latent steps tile time the same way the
+                    # target's do. Say so, because the delivered clip is that
+                    # much shorter and the reason is not otherwise visible.
+                    logging.info(
+                        "H3Studio: the pinned run was extended from %d to %d "
+                        "frames to start on a latent-step boundary — mid-clip "
+                        "handovers rarely land on one. The extra %.2fs is head "
+                        "that gets trimmed, not lost content.",
+                        run, span, (span - run) / FPS_HINT)
             else:
                 # snap BEFORE slicing: encoding an off-grid count would make the VAE
                 # keep the FIRST covered frames of the slice, ending the pinned run

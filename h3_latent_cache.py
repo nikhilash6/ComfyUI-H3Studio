@@ -40,13 +40,14 @@ _last = None            # {"video", "audio", "t", "frames"}
 
 MAX_AGE_S = 3600.0      # a stale capture is worse than a re-encode
 
-# Only the TAIL is worth keeping: the largest pinnable run is 39 frames = 12
-# latent steps, so 16 steps covers it with slack for a cut slightly inside the
-# clip. A cut further back than that falls back to re-encoding (logged) rather
+# Only the TAIL is worth keeping. The largest pinnable run is 39 frames = 12
+# latent steps; a run is then extended back to a phase-0 boundary (up to 4 more),
+# and a freeze-trimmed handover starts further back again. 24 steps covers all of
+# that. A cut further back than that falls back to re-encoding (logged) rather
 # than holding a whole clip in memory for a case that rarely happens. At a
-# 1792x992 canvas a step is ~0.65 MB, so this is ~11 MB instead of ~31 MB for
+# 1792x992 canvas a step is ~0.65 MB, so this is ~16 MB instead of ~31 MB for
 # a 6 s clip -- and flat regardless of clip length.
-KEEP_VIDEO_STEPS = 16
+KEEP_VIDEO_STEPS = 24
 # audio steps are tiny (64 floats each); 640 covers a 16 s context window
 KEEP_AUDIO_STEPS = 640
 
