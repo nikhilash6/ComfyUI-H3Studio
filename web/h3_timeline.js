@@ -1876,10 +1876,26 @@ function attachTimeline(node) {
             + `you're continuing, so nothing can be steered there`);
         return moved;
     }
+    // A handover has to land on a latent-step boundary. A pinned run can only
+    // END on one, so a handover anywhere else leaves a few frames that the
+    // previous clip shows but the continuation never pinned — and something
+    // entering frame during those (a car coming into view, measured) is
+    // invisible to the model and pops out of existence at the cut. Snapping the
+    // handover down makes the trim and the pinned run agree exactly.
+    function mcSnapCut(frame) {
+        let acc = 0, best = 0;
+        for (let k = 0; acc <= frame && k < 4096; k++) {
+            best = acc;
+            acc += [1, 4, 4, 4, 4][k % 5];
+        }
+        return best;
+    }
     function mcSetFrom(name, atSeconds) {
         setWidget("motion_context_file", name);
-        setWidget("motion_context_end_seconds",
-            atSeconds && atSeconds > 0 ? Math.round(atSeconds * 100) / 100 : 0);
+        let at = atSeconds && atSeconds > 0 ? atSeconds : 0;
+        if (at > 0) at = mcSnapCut(Math.round(at * FPS)) / FPS;
+        at = at > 0 ? Math.round(at * 100) / 100 : 0;
+        setWidget("motion_context_end_seconds", at);
         mcFixWaypoints();
         // the context IS the opening — a stale first-frame thumbnail would lie
         if (!inputConnected(node, "first_frame")
@@ -1887,6 +1903,20 @@ function attachTimeline(node) {
             setWidget("first_frame_file", "");
             setWidget("first_frame_crop", "");
         }
+        return at;
+    }
+    // Keep the reel card's out-trim on the same snapped instant the pinned run
+    // ends at. Without this the export plays a few frames past what was pinned,
+    // and whatever appears in them is missing from the next clip.
+    function mcSyncCardOut(entry, snapped) {
+        if (!entry || !(snapped > 0)) return;
+        if (Math.abs((entry.out || 0) - snapped) < 0.005) return;
+        const l = reelGet();
+        const i = l.findIndex((e) => e.name === entry.name);
+        if (i < 0) return;
+        l[i] = { ...l[i], out: snapped };
+        reelSet(l);
+        entry.out = snapped;
     }
     function mcClearWidgets() {
         if (String(widgetValue(node, "motion_context_file", "")).trim()) {
@@ -3408,10 +3438,14 @@ function attachTimeline(node) {
                         if (runSetup) e2.setup = runSetup;   // the clip remembers its recipe
                         if (renderedSpan > 0) {
                             // the render opens with the pinned context head — trim
-                            // it non-destructively. The join luma-match is NOT
-                            // armed here: it alters picture, so it stays opt-in
-                            // per clip (✨ in the ✂ popup).
+                            // it non-destructively. The join luma-match IS armed:
+                            // the first delivered frame carries the pinned head's
+                            // exposure rather than the one the model settles on,
+                            // and correcting its level is the only fix that costs
+                            // neither a frame of time nor content the model never
+                            // saw. Untick ✨ in the ✂ popup to render it raw.
                             if (!(e2.in > 0)) e2.in = trimSpan / FPS;
+                            if (e2.mc === undefined) e2.mc = true;
                         }
                         reelSet(l);
                         soundtrackForClip(e2, atStart, renderedAt);
@@ -3443,7 +3477,8 @@ function attachTimeline(node) {
                         // keeps the card's own ✨ choice; only the trim follows
                         // the new take
                         l[i] = { ...l[i], name, setup: runSetup || l[i].setup,
-                            in: trimSpan > 0 ? trimSpan / FPS : 0, out: 0 };
+                            in: trimSpan > 0 ? trimSpan / FPS : 0, out: 0,
+                            mc: l[i].mc === undefined ? trimSpan > 0 : l[i].mc };
                         reelSet(l);
                         state.reelTarget = null;
                         repB.textContent = "✓ replaced";
@@ -3634,7 +3669,7 @@ function attachTimeline(node) {
                         closeModal();
                         mcDropContRef();   // motion context replaces an old-way ref
                         if (sel.value !== "picked")
-                            mcSetFrom(e2.name, e2.out > 0 ? e2.out : undefined);
+                            mcSyncCardOut(e2, mcSetFrom(e2.name, e2.out > 0 ? e2.out : undefined));
                         refresh(true);
                         doQueue();
                     });
@@ -3708,7 +3743,7 @@ function attachTimeline(node) {
                     closeModal();
                     mcDropContRef();
                     if (sel.value !== "picked")
-                        mcSetFrom(e2.name, e2.out > 0 ? e2.out : undefined);
+                        mcSyncCardOut(e2, mcSetFrom(e2.name, e2.out > 0 ? e2.out : undefined));
                     refresh(true);
                     auto.on = true;
                     auto.left = n;
@@ -3800,11 +3835,12 @@ function attachTimeline(node) {
                 if (r.runSetup) e3.setup = r.runSetup;
                 // head trim yes, luma-match no — see the manual add path
                 if (r.trimSpan > 0 && !(e3.in > 0)) e3.in = r.trimSpan / FPS;
+                if (r.trimSpan > 0 && e3.mc === undefined) e3.mc = true;
                 reelSet(l);
             }
             if (r.reelB) { r.reelB.textContent = "✓ in reel"; r.reelB.disabled = true; }
             if (auto.left > 0) {
-                mcSetFrom(r.name, e3?.out > 0 ? e3.out : undefined);
+                mcSyncCardOut(e3, mcSetFrom(e3.name, e3.out > 0 ? e3.out : undefined));
                 refresh(true);
                 toast(`🔁 auto motion — clip added, ${auto.left} to go; next queue in a moment…`);
                 // settle window: VRAM paging and the caching allocator need a

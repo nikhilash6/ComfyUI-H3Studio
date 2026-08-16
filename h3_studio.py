@@ -185,23 +185,31 @@ MC_NOISE_SEED_BASE = 700  # per-block seeds for sub-1.0 context strength
 MC_AUDIO_SEED = 760       # for sub-1.0 context strength on the pinned sound
 SOUND_ANCHOR_SEED_BASE = 770   # per-anchor seeds for sub-1.0 anchored sound
 
-# SAFE TAIL BRIDGE. The first frames after a pinned head are unstable: the first
-# free latent step is decoded with the pinned step as its temporal context, so it
-# comes out at the CONTEXT's exposure rather than the one the model settles on.
-# Dropping them fixes the flash but loses that much time from the piece.
+# WHY THERE IS NO SAFE TAIL BRIDGE HERE.
 #
-# The fix is to stop PINNING before we stop DELIVERING. The previous clip's own
-# real frames cover the gap: pin up to frame (cut - BRIDGE), let the previous
-# clip play all the way to `cut` as it always did, and start the new clip at the
-# frame after `cut`. The unstable frames are never delivered, nothing is
-# duplicated, and no time is lost -- those instants are simply shown from the
-# clip that actually rendered them cleanly.
+# The first frame after a pinned head is unstable: the first free latent step is
+# decoded with the pinned step as its temporal context, so it arrives at the
+# CONTEXT's exposure rather than the one the model settles on. Two obvious fixes
+# both cost more than the problem:
 #
-# Idea from Herrgotts-H3-Infinite-Continuation-Suite (Safe Tail Bridge). Theirs
-# blends real tail pixels into the next clip; ours needs no blending because the
-# reel already plays the previous clip up to its own out-trim, so the bridge is
-# a trim arithmetic change rather than an image operation.
-MC_BRIDGE_FRAMES = 2
+#   drop it            -- loses 1/24 s at every link.
+#   bridge it          -- stop pinning a couple of frames before the previous
+#                         clip stops playing, and let its real frames cover
+#                         those instants (Herrgotts-H3-Infinite-Continuation-
+#                         Suite's Safe Tail Bridge).
+#
+# The bridge was tried and reverted, because a pinned run has to end on a latent
+# step boundary and a step is up to FOUR frames: holding back "two" frames really
+# holds back a whole step. The model then never sees what happened in them, so it
+# continues from its OWN invention of that moment while the reel shows the
+# previous clip's real version -- measured on a chain where a car enters the
+# frame during those four frames and then vanishes at the cut. A missing object
+# is worse than a one-frame level blip.
+#
+# So: pin everything the previous clip delivers, lose no time, and correct the
+# one unstable frame's LEVEL at export instead (h3_reel._luma_match, a decaying
+# gain over the opening frames). Nothing is dropped, nothing diverges.
+MC_BRIDGE_FRAMES = 0
 MC_FRAME_RESCALE = 5.0 / 3.0   # audio latent steps per pixel frame
 
 
@@ -1434,17 +1442,24 @@ class H3StudioImageToVideo(io.ComfyNode):
                 # a fresh encode always starts on phase 0 and ends at the pin
                 head_start, head_end = pin_cut - run, pin_cut - 1
 
-            # Where the delivered clip starts: the frame straight after the last
-            # one the PREVIOUS clip plays. Everything between the pinned head and
-            # there is the bridge -- unstable frames of ours, covered by real
-            # frames of theirs.
-            mc_head_trim = int(cut - head_start)
-            if mc_head_trim > mc_span:
+            # Where the delivered clip starts: straight after the pinned head.
+            # Its first frame is the unstable one; the reel corrects its level
+            # rather than dropping it, so no time is lost and the model has seen
+            # everything the previous clip shows.
+            mc_head_trim = int(mc_span)
+            if head_end + 1 < cut:
+                # a handover that is not on a latent-step boundary leaves a few
+                # frames the previous clip shows but the model never saw. Small,
+                # but it is exactly how an object entering frame goes missing, so
+                # say it rather than let it be a mystery.
                 logging.info(
-                    "H3Studio: safe tail bridge — the previous clip plays its own "
-                    "%d real frame(s) after the pinned head, so this clip starts "
-                    "at frame %d and its unstable opening is never shown. No time "
-                    "is lost.", mc_head_trim - mc_span, mc_head_trim)
+                    "H3Studio: the handover at frame %d is %d frame(s) past the "
+                    "last latent-step boundary (%d). Those frames play in the "
+                    "previous clip but are not pinned, so anything that appears "
+                    "in them is new to this render. Trim the previous clip to "
+                    "%.2fs to line the two up exactly.",
+                    cut, cut - (head_end + 1), head_end + 1,
+                    (head_end + 1) / FPS_HINT)
             # The editor works the head trim out from the widgets at QUEUE time,
             # but phase alignment and the bridge are only decidable here. Tell it,
             # or it trims the requested run and leaves repeated (and unstable)

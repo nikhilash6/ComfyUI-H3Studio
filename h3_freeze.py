@@ -60,6 +60,25 @@ MAX_STATIC_STREAK = 2
 
 MIN_FREEZE = 4             # shorter than this is not a freeze, it is an ending
 
+FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
+
+
+def snap_to_step(frame):
+    """The largest latent-step boundary at or before `frame`.
+
+    A handover has to land on one. Anywhere else leaves a few frames that the
+    previous clip shows but the continuation never pinned -- and a car entering
+    frame during those is a car that vanishes at the cut. Snapping the
+    recommendation down means the trim and the pinned run agree exactly.
+    """
+    acc, best = 0, 0
+    for k in range(4096):
+        if acc > int(frame):
+            break
+        best = acc
+        acc += FRAME_PER_TOKEN[k % 5]
+    return best
+
 
 def _prepare(frames):
     """[T,H,W,C] in 0..1 -> small, lightly blurred [T,3,h,w]."""
@@ -221,7 +240,10 @@ def register():
             from .h3_studio import load_input_video
             frames, _ = load_input_video(name, "freeze_scan", max_seconds=None)
             info = analyse(frames)
-            info["seconds"] = (info["freeze_start"] / fps) if info["frozen"] else 0.0
+            # snapped so the trim lands where a pinned run can actually end
+            cut = snap_to_step(info["freeze_start"]) if info["frozen"] else 0
+            info["cut_frame"] = cut
+            info["seconds"] = (cut / fps) if cut > 0 else 0.0
             return info
 
         try:

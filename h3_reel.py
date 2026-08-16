@@ -110,15 +110,24 @@ def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
     return next_f
 
 
-def _luma_match(prev_f, next_f, frames=12, lo=0.82, hi=1.22):
+def _luma_match(prev_f, next_f, frames=4, lo=0.82, hi=1.22):
     """Flatten the brightness zigzag at a motion-continuation join.
 
-    The model's first generated frames after a pinned context block run ~8%
-    bright for a frame, then ~10% dark, before converging (measured) -- a
-    visible flash on a hard cut. Gain-correct next_f's first `frames` frames
-    toward the previous clip's closing level, the correction decaying linearly
-    to zero so a legitimate lighting change survives. Export-time only; the
-    render file is untouched.
+    The first delivered frame after a pinned context block carries the CONTEXT's
+    exposure rather than the one the model settles on -- the first free latent
+    step is decoded using the pinned step as its temporal context. Measured on a
+    real chain: last pinned 0.3105, first delivered 0.3067, next frame 0.2847.
+    One frame out of step, which on a hard cut reads as a flash.
+
+    Gain-correct next_f's opening frames toward the previous clip's closing
+    level, decaying linearly to zero so a legitimate lighting change survives.
+
+    The window is deliberately SHORT. It is one frame that is wrong, and
+    correcting over half a second instead visibly drags the following frames --
+    the brightness drift that Herrgotts-H3-Infinite-Continuation-Suite hit and
+    documented when it tried the same approach.
+
+    Export-time only; the render file is untouched.
     """
     anchor = float(prev_f[-4:].mean())
     n = min(frames, next_f.shape[0])

@@ -163,16 +163,20 @@ This is not the reel's fx lanes — those mix a sample over a finished video. Th
 one is a **condition**: the model hears it while rendering. Keep the files short,
 since an anchored sound holds audio rows for its whole length.
 
-Nothing is lost at the join, and nothing repeats. The frames immediately after a
-pinned head are unstable — the first free latent step is decoded using the pinned
-step as its temporal context, so it arrives at the *context's* exposure rather
-than the one the model settles on, which is what a flash at a cut actually is.
-Rather than drop them and lose the time, the pack stops **pinning** a couple of
-frames before the previous clip stops **playing**: those instants are shown from
-the previous clip's own real frames, the unstable ones are never delivered, and
-the join is frame-exact. Idea from
-[Herrgotts-H3-Infinite-Continuation-Suite](https://github.com/HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite)
-(Safe Tail Bridge).
+Nothing is lost at the join and nothing is hidden from the model. A handover has
+to land on a latent-step boundary — a pinned run can only *end* on one — so the
+editor snaps it there. Anywhere else leaves a few frames that the previous clip
+shows but the continuation never pinned, and anything that appears in them (a car
+coming into view) is new to the next clip and pops out of existence at the cut.
+
+The first delivered frame after a pinned head carries the *context's* exposure
+rather than the one the model settles on, which is what a flash at a cut is. It
+is corrected by level at export (**✨ luma-match join**, now on by default for
+continued clips, over a short window so it cannot drag the frames after it).
+Dropping the frame instead would cost 1/24 s at every link, and holding frames
+back so the previous clip covers them — Herrgott's Safe Tail Bridge — was tried
+and reverted: a latent step is up to four frames, so the model stops seeing what
+happened in them.
 
 ### …build several clips hands-free
 Pick **Auto Motion Mode** in that same chooser and give it a clip count. It
