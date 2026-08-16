@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-h3studio"
-version = "1.3.1"
+version = "1.4.0"
 description = "A video editor for MiniMax H3 inside a single ComfyUI node. Keyframes with independent strength dials (guide the motion instead of pinning it), waypoints the clip passes through, and a fullscreen timeline editor with filmstrip cards, framing tool, cast members that persist across clips, and free Creative-Commons image/audio search built in. Continue a clip with real continuity: the previous render's tail frames AND audio are pinned at the new head, so motion and the actual waveform carry through the join — with an auto mode that chains clips hands-free. Finished clips land on a reel you can trim, crossfade, level, score with a soundtrack lane plus three fx lanes, and export as one video. Also includes v2v restyling, soft denoise zones (differential diffusion with per-frame masks), regional prompting and a temporal LoRA blend."
 license = { text = "MIT" }
 authors = [
