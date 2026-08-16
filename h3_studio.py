@@ -51,13 +51,18 @@ from comfy_api.latest import ComfyExtension, io, InputImpl
 
 import comfy.model_management
 
-from . import (extra_conds_patch, h3_latent_cache, h3_row_aug_patch,
+from . import (extra_conds_patch, h3_core, h3_latent_cache, h3_row_aug_patch,
                h3_time_warp, middle_frame_patch, turbo_compat)
 
 try:
     from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP as _VIS_T
 except Exception:  # core moved the constant; 0.999 is its long-standing value
     _VIS_T = 0.999
+
+try:
+    from comfy.ldm.minimax.model import AUDIO_COND_TIMESTEP as _AUD_T
+except Exception:
+    _AUD_T = 1.0
 
 
 def crop_box(src_w, src_h, out_w, out_h, zoom, center_x, center_y):
@@ -174,9 +179,67 @@ REF_IMAGE_SHORT_EDGE = 2048
 # render-verified their approach before we adopted it natively.
 MC_FRAME_PER_TOKEN = (1, 4, 4, 4, 4)  # pixel frames covered by latent step k%5
 MC_VIDEO_RUN_GRID = (39, 22, 5, 1)    # run lengths the video VAE distinguishes
-MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
+MC_AUDIO_END_KEY = extra_conds_patch.MC_AUDIO_END_KEY   # older layout only
 MC_ANCHOR_CLAMP = 0.08    # max brightness nudge per link (0-1 RGB scale)
 MC_NOISE_SEED_BASE = 700  # per-block seeds for sub-1.0 context strength
+MC_AUDIO_SEED = 760       # for sub-1.0 context strength on the pinned sound
+SOUND_ANCHOR_SEED_BASE = 770   # per-anchor seeds for sub-1.0 anchored sound
+MC_FRAME_RESCALE = 5.0 / 3.0   # audio latent steps per pixel frame
+
+
+def mc_audio_anchor(end_frame, rt):
+    """Where to put a pinned audio window that must END at `end_frame`.
+
+    Returns (anchor_frame, end_frame_snapped, nudge_ms).
+
+    The window reaches BACKWARDS from the join: `rt` audio steps ending at the
+    instant the pinned picture ends. Expressed as a keyframe anchor that is a
+    fraction of a frame -- and often slightly negative, since the sound reaches
+    further back than the pinned frames do. Nothing minds: the anchor is only
+    ever multiplied by FRAME_RESCALE.
+
+    THE GRID. Audio rows sit one latent step apart, and every audio row the
+    model has ever seen sat a whole number of steps from its origin. A pixel
+    frame is 5/3 of a step, so a join at frame 22 lands at 36.667 -- two thirds
+    of the way between two rows, where no pinned row ever coincides with a row
+    the model is filling. That is a third of a step of phase error, 8.3 ms at
+    40 Hz, which is the size of the late-join offset chains have been measured
+    to have. So the end is snapped to the nearest whole step and the window
+    placed from there; the pinned sound moves by at most half a step (12.5 ms)
+    and every row lands exactly on the grid.
+
+    Joins at a frame count divisible by 3 are already on the grid and are not
+    moved at all -- a 39-frame context is exact, 22 and 5 are not.
+    """
+    end_t = MC_FRAME_RESCALE * float(end_frame)
+    snapped = float(round(end_t))
+    nudge_ms = (snapped - end_t) / 40.0 * 1000.0
+    return (snapped - float(rt)) / MC_FRAME_RESCALE, snapped / MC_FRAME_RESCALE, nudge_ms
+
+
+def mc_audio_block(z_a, rt, mc_span):
+    """The pinned sound, in whichever form this ComfyUI can carry it.
+
+    Returns (keyframe, ref_block, note) with exactly one of the first two set.
+
+    Current core lets a keyframe carry `audio_latent`, which gives it a
+    cond_audio segment anchored at the keyframe's own coordinate -- exactly what
+    a window reaching back from the join needs, with nothing patched. The older
+    layout reads only a keyframe's picture, so there the sound has to ride the
+    reference machinery and have its coordinates moved afterwards
+    (extra_conds_patch.relocate_context_audio).
+
+    Both land on the same coordinates. The keyframe form is preferred because it
+    keeps the pinned sound out of the reference list entirely, so it stops
+    competing with real reference audio for ordinals.
+    """
+    anchor, end_frame, nudge = mc_audio_anchor(mc_span, rt)
+    if h3_core.keyframe_audio():
+        return ({"resolved_frame_index": anchor, "audio_latent": z_a,
+                 extra_conds_patch.AUDIO_END_KEY: end_frame,
+                 "audio_steps": int(rt)}, None, nudge)
+    return (None, {"kind": "audio", "ref_audio_t": int(rt), "audio_latent": z_a,
+                   MC_AUDIO_END_KEY: end_frame}, nudge)
 
 
 def mc_step_offsets(latent_t):
@@ -615,6 +678,58 @@ def parse_timed_text(spec, frame_count):
     return sorted(out, key=lambda e: e["index"])
 
 
+def parse_sound_anchors(spec, frame_count):
+    """Parse the sound-anchor block: one 'position, file' per line.
+
+    Same position convention as every other spec here: at or below 1.0 it is a
+    fraction of the clip, above it a frame number. An optional strength may sit
+    between them -- 'position, strength, file' -- so a sound can be a hint rather
+    than a fixed event. The file is anything the input folder holds that the
+    audio loader understands, and commas in filenames are fine because the
+    filename is whatever is left after the leading fields.
+    """
+    out = []
+    for i, raw in enumerate(spec.splitlines()):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(",")
+        if len(parts) < 2 or not parts[-1].strip():
+            raise ValueError("H3 Studio: sound_anchors line %d (%r) needs "
+                             "'position, file' (or 'position, strength, file')."
+                             % (i + 1, line))
+        try:
+            pos = float(parts[0].strip())
+        except ValueError:
+            raise ValueError(
+                "H3 Studio: sound_anchors line %d (%r) -- position must be a "
+                "number (fraction of the clip, or a frame number above 1.0)."
+                % (i + 1, line))
+        if not math.isfinite(pos):
+            raise ValueError("H3 Studio: sound_anchors line %d (%r) -- position "
+                             "must be a finite number." % (i + 1, line))
+        strength, rest = 1.0, parts[1:]
+        # a numeric second field is a strength; anything else is the filename
+        if len(parts) > 2:
+            try:
+                strength = float(parts[1].strip())
+                rest = parts[2:]
+            except ValueError:
+                pass
+        if not math.isfinite(strength) or not (0.0 < strength <= 1.0):
+            raise ValueError("H3 Studio: sound_anchors line %d (%r) -- strength "
+                             "must be above 0 and at most 1.0." % (i + 1, line))
+        name = ",".join(rest).strip()
+        if not name:
+            raise ValueError("H3 Studio: sound_anchors line %d (%r) names no file."
+                             % (i + 1, line))
+        x = pos * (frame_count - 1) if pos <= 1.0 else pos
+        index = int(math.floor(x + 0.5))
+        out.append({"index": min(max(index, 0), frame_count - 1),
+                    "strength": strength, "file": name, "line": i + 1})
+    return sorted(out, key=lambda e: e["index"])
+
+
 def text_ids_fn(clip):
     """The tokenizer's raw text->ids helper, or None if this isn't a MiniMax H3 clip."""
     tok = getattr(clip, "tokenizer", None)
@@ -676,11 +791,21 @@ def flow_blend(z, a, seed):
 
 
 def row_aug_ready():
-    """Per-row labels just need the source patch. Turbo included: its rebuilt
-    adaln E-grid interpolates at arbitrary timesteps and turbo_compat's
-    correct_unique_t feeds it the per-row values, while segment assignment
-    comes from the same patched _forward table."""
-    return h3_row_aug_patch.install()
+    """Per-row labels need BOTH halves, so both are asked for here.
+
+    h3_row_aug_patch teaches the DiT to read a per-block label list;
+    extra_conds_patch is what BUILDS that list out of the keyframe and reference
+    blocks. With only the first, a caller would blend a latent down to 0.7 and
+    then hand the model a row still labelled 0.999 -- "a clean image full of
+    static", which is the distortion this whole mechanism exists to avoid. One
+    of them missing has to mean "fall back to the variance-preserving blend",
+    not "do half of it".
+
+    Turbo is included: its rebuilt adaln E-grid interpolates at arbitrary
+    timesteps and turbo_compat's correct_unique_t feeds it the per-row values,
+    while segment assignment comes from the same patched _forward table.
+    """
+    return h3_row_aug_patch.install() and extra_conds_patch.install()
 
 
 class H3StudioImageToVideo(io.ComfyNode):
@@ -797,6 +922,8 @@ class H3StudioImageToVideo(io.ComfyNode):
                     tooltip="EXPERIMENTAL. How much motion the clip contains, as a direct dial rather than a hint.\n\nEvery other motion control describes what should happen. This one rescales the model's CLOCK: the video's RoPE time coordinates carry a fixed amount of time between frames, and widening those gaps tells the model more time passes -- so more has to change. Content, prompt and keyframes are untouched.\n\n1.0 = stock, and the timeline is left byte-for-byte alone. 1.3 packs about a third more movement into the same frames; 0.7 slows the whole clip down. Roughly 0.8-1.3 stays close to what the model was trained on; further out is increasingly a guess.\n\nNote the soundtrack is NOT rescaled, so audio drifts against the picture as you move away from 1.0."),
                 io.String.Input("motion_curve", multiline=True, default="",
                     tooltip="OPTIONAL, needs no motion_scale. Vary the speed ACROSS the clip instead of applying one value to all of it -- one line per control point:\n\n    position, speed\n\nposition is a fraction of the clip (0.5 = halfway) or an absolute frame number above 1.0. speed is the same dial as motion_scale, at that moment. Between two points the speed ramps linearly; before the first and after the last it is held flat.\n\nExample -- settle, then accelerate away:\n    0.0, 0.6\n    0.5, 0.8\n    1.0, 1.8\n\nSpeeds multiply with motion_scale, so leave that at 1.0 unless you want to push the whole curve at once. Speeding a section up also pushes everything after it later in the clip's time -- that is what a time axis does. Lines starting with # are ignored."),
+                io.String.Input("sound_anchors", multiline=True, default="",
+                    tooltip="EXPERIMENTAL. Pin a SOUND at a moment of the clip -- one line per anchor:\n\n    position, file\n    position, strength, file\n\nposition is a fraction of the clip (0.5 = halfway) or an absolute frame number above 1.0; file is an audio file in the input folder. The sound is anchored AT that frame and runs forward from it, so the model generates the picture that goes with it: a door slam at 2.4s, a phone starting to ring, a line of dialogue landing on a cut.\n\nThis is not the same as the reel's fx lanes, which mix a sample over the finished video. This one is a CONDITION -- the model hears it while rendering and the picture responds. It also occupies audio rows for its whole length, so keep the files short.\n\nstrength below 1.0 makes it a hint rather than a fixed event (same flow-blend and per-row labelling as the keyframe strengths). Needs audio_vae, and a ComfyUI new enough to anchor audio at a frame (it is skipped with a warning otherwise). Lines starting with # are ignored."),
                 io.Autogrow.Input("ref_masks", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Mask.Input("ref_mask", tooltip="Optional mask for the SAME-NUMBERED ref_image (ref_mask_0 masks ref_image_0). White keeps the reference at its full strength, black dilutes it to noise. Use it to take just a face or a subject from a busy photo. Note the masked-out area still costs the same compute -- it loses influence, not sequence rows."),
@@ -836,6 +963,12 @@ class H3StudioImageToVideo(io.ComfyNode):
             names.append(kwargs["v2v_video_file"].strip())
         if (kwargs.get("motion_context_file") or "").strip():
             names.append(kwargs["motion_context_file"].strip())
+        # sound anchors name their files inside the spec, one per line
+        try:
+            names += [e["file"] for e in
+                      parse_sound_anchors(kwargs.get("sound_anchors", "") or "", 2)]
+        except ValueError:
+            pass   # a malformed spec is reported at execute, not here
         parts = []
         for n in names:
             try:
@@ -905,7 +1038,7 @@ class H3StudioImageToVideo(io.ComfyNode):
                 motion_context_anchor_brightness=False, motion_context_strength=0.92,
                 first_frame_crop="", last_frame_crop="",
                 middle_frame_crops="", ref_image_crops="",
-                motion_scale=1.0, motion_curve="",
+                motion_scale=1.0, motion_curve="", sound_anchors="",
                 first_frame=None, last_frame=None, middle_frames=None,
                 ref_images=None, ref_masks=None, ref_audios=None,
                 ref_videos=None, ref_video_audios=None,
@@ -1070,7 +1203,8 @@ class H3StudioImageToVideo(io.ComfyNode):
         # rows are ground truth -- strength 1.0, no noise_aug, untouched by the
         # sub-1.0 label machinery.
         mc_file = (motion_context_file or "").strip()
-        mc_keyframes, mc_span, mc_audio_block = [], 0, None
+        mc_keyframes, mc_span = [], 0
+        mc_audio_kf, mc_audio_ref = None, None
         if mc_file and motion_context_reuse_latent:
             # arm the session cache so THIS render's latent is kept for the
             # NEXT link — capture stays idle until a chain is actually running
@@ -1215,12 +1349,14 @@ class H3StudioImageToVideo(io.ComfyNode):
                     start_g, rt_a = a_base, end_g - a_base
                 z_a = a_lat[..., start_g - a_base:end_g - a_base].to(
                     comfy.model_management.intermediate_device())
-                mc_audio_block = {"kind": "audio", "ref_audio_t": int(z_a.shape[-1]),
-                                  "audio_latent": z_a,
-                                  MC_AUDIO_END_KEY: float(mc_span)}
+                mc_audio_kf, mc_audio_ref, nudge = mc_audio_block(
+                    z_a, int(z_a.shape[-1]), mc_span)
                 logging.info("H3Studio: motion context audio sliced from the "
                              "cached latent too — %d steps, no audio VAE round "
-                             "trip.", int(z_a.shape[-1]))
+                             "trip.%s", int(z_a.shape[-1]),
+                             "" if abs(nudge) < 0.05 else
+                             " Window end nudged %+.1f ms onto the audio grid."
+                             % nudge)
             elif a_frames > 0:
                 if mc_snd is None or mc_snd.get("waveform") is None:
                     logging.info("H3Studio: motion context source %r has no "
@@ -1247,9 +1383,12 @@ class H3StudioImageToVideo(io.ComfyNode):
                         z_a, rt_a = encode_ref_audio(
                             audio_vae, {"waveform": wf, "sample_rate": sr})
                         if rt_a > 0:
-                            mc_audio_block = {"kind": "audio", "ref_audio_t": rt_a,
-                                              "audio_latent": z_a,
-                                              MC_AUDIO_END_KEY: float(mc_span)}
+                            mc_audio_kf, mc_audio_ref, nudge = mc_audio_block(
+                                z_a, rt_a, mc_span)
+                            if abs(nudge) >= 0.05:
+                                logging.info("H3Studio: motion context audio "
+                                             "window end nudged %+.1f ms onto "
+                                             "the audio grid.", nudge)
 
             # Loop gain: pinned rows are ground truth at 1.0, so the model
             # reproduces them EXACTLY -- artifacts included. Chain that and any
@@ -1280,6 +1419,28 @@ class H3StudioImageToVideo(io.ComfyNode):
                     logging.warning("H3Studio: motion context strength %.2f "
                                     "without the per-row label patch — softened, but "
                                     "expect less clean results than at 1.0.", mcs)
+
+            # The same argument applies to the sound, and more strongly: dulling
+            # is THE documented failure of a long chain, and it is exactly what a
+            # loop with gain slightly above 1 does. Pinned at 1.0 the model
+            # reproduces the tail waveform including whatever the last link
+            # smeared; below 1.0 it regenerates that second of audio guided by
+            # it. Only available where the sound is a keyframe (current core) --
+            # a reference block's label is shared with every other reference.
+            if mcs < 1.0 and mc_audio_kf is not None:
+                if row_aug_ready():
+                    a_lbl = mcs * _AUD_T
+                    mc_audio_kf["audio_noise_aug"] = a_lbl
+                    mc_audio_kf["audio_latent"] = flow_blend(
+                        mc_audio_kf["audio_latent"], a_lbl, MC_AUDIO_SEED)
+                else:
+                    mc_audio_kf["audio_latent"] = weaken_cond_latent(
+                        mc_audio_kf["audio_latent"], mcs, MC_AUDIO_SEED)
+
+            # audio-only, so it goes on the end: the video blocks' order is what
+            # gives them their anchors, and this one carries its own
+            if mc_audio_kf is not None:
+                mc_keyframes.append(mc_audio_kf)
 
             if first_frame is not None or first_frame_file.strip():
                 logging.info("H3Studio: motion context occupies frames 0-%d -- "
@@ -1319,10 +1480,14 @@ class H3StudioImageToVideo(io.ComfyNode):
                          "the head as %d cond block(s) at indices %s, audio %s. The "
                          "first %.2fs of the render repeats the source tail; the editor "
                          "trims it on the reel.",
-                         run, mc_file, len(mc_keyframes),
+                         run, mc_file,
+                         len(mc_keyframes) - (1 if mc_audio_kf is not None else 0),
                          "%d..%d" % (offsets[0], offsets[-1]),
-                         ("%d latent steps ending at the join" % mc_audio_block["ref_audio_t"])
-                         if mc_audio_block else "off",
+                         ("%d latent steps ending at the join, as %s"
+                          % ((mc_audio_kf or mc_audio_ref)["audio_steps"]
+                             if mc_audio_kf else mc_audio_ref["ref_audio_t"],
+                             "keyframe audio" if mc_audio_kf else "a moved reference"))
+                         if (mc_audio_kf or mc_audio_ref) else "off",
                          mc_span / FPS_HINT)
 
         # Ordered along the timeline so <Picture N> labels read in temporal order.
@@ -1486,19 +1651,21 @@ class H3StudioImageToVideo(io.ComfyNode):
             ref_items.append({"type": "audio"})
             ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t,
                                "audio_latent": z})
-        if mc_audio_block is not None:
+        if mc_audio_ref is not None:
+            # OLDER LAYOUT ONLY -- current core carries this as keyframe audio,
+            # which never touches the reference list at all.
             # Always the LAST ref block, and deliberately item-less: the tokenizer
             # never numbers it, so <Audio N> labels stay stable whether or not a
             # context is set. Its rows reach the DiT; extra_conds_patch moves
             # their time coordinates onto the clip's own timeline. It is also
             # excluded from ref_audio_strength -- context is ground truth.
-            ref_blocks.append(mc_audio_block)
+            ref_blocks.append(mc_audio_ref)
             if not extra_conds_patch.install():
                 raise RuntimeError(
                     "H3 Studio: motion-context audio needs the extra_conds "
                     "patch, which could not be installed. See the log; set "
                     "motion_context_audio_frames to 0 to continue picture only.")
-        if ref_audio_list or n_soundtracks or mc_audio_block is not None:
+        if ref_audio_list or n_soundtracks or mc_audio_kf or mc_audio_ref:
             # Retry in case the turbo pack loaded after this one. Its adaln row table
             # ignores audio conditioning and dies with a shape mismatch otherwise.
             if not turbo_compat.install() and turbo_compat.turbo_present():
@@ -1591,10 +1758,71 @@ class H3StudioImageToVideo(io.ComfyNode):
             cond = node_helpers.conditioning_set_values(cond,
                                                         {"minimax_time_warp": warp})
 
+        # Anchored sound: a keyframe that carries audio instead of a picture, so
+        # its rows sit at that frame's coordinate and run forward from it. Built
+        # last because it is additive -- it takes no picture rows and no <Audio N>
+        # label, so nothing above it shifts.
+        anchors = parse_sound_anchors(sound_anchors, frame_count)
+        if anchors and not h3_core.keyframe_audio():
+            logging.warning(
+                "H3Studio: sound_anchors needs a ComfyUI whose H3 layout can "
+                "anchor audio at a frame (the MiniMaxH3AddGuide change). This "
+                "build's cannot, so %d anchored sound(s) are skipped -- the "
+                "render is otherwise unaffected. Reference audio still works.",
+                len(anchors))
+            anchors = []
+        if anchors:
+            if audio_vae is None:
+                raise ValueError(
+                    "H3 Studio: sound_anchors needs audio_vae -- wire the "
+                    "MiniMax H3 audio VAE in, or clear the spec.")
+            audio_t_total = round(frame_count / FPS_HINT * 40.0)
+            for n, a in enumerate(anchors):
+                z, rt = encode_ref_audio(audio_vae, load_input_audio(a["file"],
+                                                                     "sound_anchors"))
+                if rt <= 0:
+                    raise ValueError(
+                        "H3 Studio: sound_anchors line %d -- %r encoded to zero "
+                        "length. Check the file is not empty."
+                        % (a["line"], a["file"]))
+                # a sound running off the end of the clip has nowhere to go: the
+                # rows would sit past the target audio grid entirely
+                room = audio_t_total - int(round(MC_FRAME_RESCALE * a["index"]))
+                if room < 1:
+                    raise ValueError(
+                        "H3 Studio: sound_anchors line %d anchors at frame %d, "
+                        "which is past the end of a %d-frame clip's soundtrack."
+                        % (a["line"], a["index"], frame_count))
+                if rt > room:
+                    logging.info("H3Studio: sound anchor %r is longer than the "
+                                 "clip has left at frame %d -- using its first "
+                                 "%.2fs.", a["file"], a["index"], room / 40.0)
+                    z, rt = z[..., :room].clone(), room
+                kf = {"resolved_frame_index": a["index"], "audio_latent": z,
+                      "audio_steps": rt}
+                s = a["strength"]
+                if s < 1.0:
+                    if row_aug_ready():
+                        kf["audio_noise_aug"] = s * _AUD_T
+                        kf["audio_latent"] = flow_blend(z, kf["audio_noise_aug"],
+                                                        SOUND_ANCHOR_SEED_BASE + n)
+                    else:
+                        kf["audio_latent"] = weaken_cond_latent(
+                            z, s, SOUND_ANCHOR_SEED_BASE + n)
+                keyframes.append(kf)
+                logging.info("H3Studio: sound anchor -- %r at frame %d (%.2fs), "
+                             "%.2fs long, strength %.2f.", a["file"], a["index"],
+                             a["index"] / FPS_HINT, rt / 40.0, s)
+            if not turbo_compat.install() and turbo_compat.turbo_present():
+                logging.warning(
+                    "H3Studio: ComfyUI-MiniMax-H3-Turbo is loaded but could not be "
+                    "patched for audio conditioning; anchored sound may fail to "
+                    "sample. Remove the turbo LoRA or clear sound_anchors.")
+
         if keyframes:
             for kf in keyframes:
                 if "image" not in kf:
-                    continue  # motion-context block: latent already final
+                    continue  # motion-context or sound block: latent already final
                 z = vae.encode(kf.pop("image"))
                 s = kf.pop("strength")
                 seed = kf.pop("noise_seed")
@@ -1642,8 +1870,10 @@ class H3StudioExtension(ComfyExtension):
         from .h3_v2v import H3BasicScheduler
         from .h3_diff_v2v import H3SoftDenoiseZone
         from .h3_regional import H3RegionalPrompt
+        from .h3_seam_probe import H3SeamProbe
         return [H3StudioImageToVideo, H3TemporalLoraBlend,
-                H3BasicScheduler, H3SoftDenoiseZone, H3RegionalPrompt]
+                H3BasicScheduler, H3SoftDenoiseZone, H3RegionalPrompt,
+                H3SeamProbe]
 
 
 async def comfy_entrypoint() -> H3StudioExtension:

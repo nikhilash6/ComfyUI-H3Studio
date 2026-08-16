@@ -105,6 +105,44 @@ The MOTION bar carries the dials: how many frames to pin, **⚡ latent reuse**
 it, which is what stops quality compounding down a chain), and **⚖ anchor
 brightness** if a long chain starts to drift.
 
+### …check whether a join actually worked
+Add **H3 Seam Probe** and give it this clip's audio *before* the trim, the audio
+of the clip it continues, and the same frame count you pinned. It measures four
+things and passes the audio through unchanged, so it can live in the graph
+permanently:
+
+```
+continuation  : lag +0.4 ms, correlation 0.981  -- continuation, on time
+level at cut  : +0.31 dB  -- inaudible
+room tone     : +0.12 dB  -- inaudible
+```
+
+The measurement set, its thresholds and the finding that made it necessary are
+**ComfyUI-H3-Motion-Context**'s, same as the motion-context technique itself.
+
+**Correlation** is the one that matters. Above `0.9` the model continued your
+actual waveform; around `0.5` it wrote something that merely *sounds like* it,
+which is the failure continuation exists to prevent and is easy to miss by ear on
+one join. Lag catches drift, and the two dB figures catch a level or room-tone
+jump at the cut. Chain degradation is cumulative and small per link, so measuring
+one join beats watching six.
+
+### …put a sound at a moment — EXPERIMENTAL
+`sound_anchors` on the node, one line per anchor:
+
+```
+0.4, door-slam.wav
+72, 0.7, phone-ring.wav
+```
+
+Position is a fraction of the clip or a frame number; the optional middle number
+is a strength. The sound is pinned *at* that frame and the model renders the
+picture that goes with it.
+
+This is not the reel's fx lanes — those mix a sample over a finished video. This
+one is a **condition**: the model hears it while rendering. Keep the files short,
+since an anchored sound holds audio rows for its whole length.
+
 ### …build several clips hands-free
 Pick **Auto Motion Mode** in that same chooser and give it a clip count. It
 queues, adds to the reel, and continues from itself that many times, same prompt
@@ -222,6 +260,7 @@ header shows a live cost meter.
 | **H3 Regional Prompt (mask)** | Point part of the prompt at the masked region |
 | **H3 Basic Scheduler (wired denoise)** | Core's scheduler with denoise as a socket, so v2v_denoise drives it. Its `rescale` mode also fixes core's dead zone at high denoise |
 | **MiniMax H3 Temporal LoRA Blend** | Different LoRA weights before and after a moment inside the clip |
+| **H3 Seam Probe** | Measure a join: is the audio really continued, and do level or room tone step at the cut |
 
 > **Temporal LoRA Blend needs testing.** It is the least exercised node here —
 > the maths is sound and it runs, but how it behaves across real LoRAs, boundary
@@ -251,6 +290,15 @@ header shows a live cost meter.
   ComfyUI-H3-Motion-Context in the same session — pick one pack.
 - **Above `1.0` strength is unclamped** and off-distribution. It is there
   because sometimes you want it. It can also blow out the ending.
+- **`sound_anchors` is experimental**, and needs a ComfyUI new enough to anchor
+  audio at a frame (the `MiniMaxH3AddGuide` change). On older builds the anchors
+  are skipped with a warning rather than silently ignored; nothing else about the
+  render changes.
+- **Strength dials need the per-row label patch.** Every keyframe strength and
+  `motion_context_strength` below `1.0` relabels its row's timestep to match how
+  far it was blended. That patch reads ComfyUI's live source, so a change upstream
+  can disable it — you get a warning at render time and a softer, less clean
+  fallback, not a wrong render. If you see it, the pack needs an update.
 - **`motion_scale` / `motion_curve` are experimental and may be removed.** They
   rescale the RoPE time axis, which is off-distribution the moment you leave
   `1.0`, and audio is deliberately left on the original clock.

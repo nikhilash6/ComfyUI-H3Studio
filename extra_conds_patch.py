@@ -1,28 +1,49 @@
-"""Single wrapper around MiniMaxH3.extra_conds, covering two separate fixes.
+"""Single wrapper around MiniMaxH3.extra_conds.
 
-Both need the same hook, so they share one wrapper rather than stacking two (which
-would each capture the other as "the original" and refuse to install).
+Everything here needs the same hook, so it is one wrapper rather than a stack
+(each would capture the other as "the original" and refuse to install).
 
-1. REF MERGE. `extra_conds` builds the DiT's flat list of never-denoised condition
-   latents, but assigns it twice:
+Several of these fixes are for the OLDER H3 layout only -- ComfyUI's e01fb4c
+implemented them itself. Each says which, and asks h3_core rather than sniffing
+around in core. On a current build this wrapper does timed text and motion
+timing and nothing else.
+
+1. REF MERGE (older layout only). `extra_conds` built the DiT's flat list of
+   never-denoised condition latents and assigned it twice:
 
        payload["cond_video_latents"] = [kf["latent"] for kf in keyframes]   # then...
        payload["cond_video_latents"] = [r["latent"] for r in refs ...]      # ...clobbered
 
-   With both present the packed layout reserves rows for keyframes AND refs while the
-   model supplies only the refs, so filling the non-denoised slots raises a shape
-   mismatch. Keyframes and reference images therefore cannot be combined in stock
-   ComfyUI at all. The layout itself is fine -- it packs both correctly -- so the fix
-   is simply to concatenate in the order the layout allocates: keyframes, then refs.
+   With both present the packed layout reserves rows for keyframes AND refs while
+   the model supplies only the refs, so filling the non-denoised slots raises a
+   shape mismatch -- keyframes and reference images could not be combined at all.
+   The layout itself packs both correctly, so the fix is to concatenate in the
+   order it allocates: keyframes, then refs. Current core concatenates.
 
-2. TIMED TEXT. Relocates spans of prompt text onto the video timeline. See the
-   module docstring notes on apply_text_beats below.
+2. KEYFRAME ANCHORS (older layout only, or whenever motion timing is on).
+   Anchors used to be measured from text_len, which is only the target video's
+   origin when there are no references. Current core measures from the post-refs
+   cursor. We still re-anchor when the clock has been rescaled, because then the
+   frame a keyframe is pinning has moved.
 
-3. TIME WARP. Rescales the target video's RoPE clock to dial motion up or down.
-   See h3_time_warp. Everything anchored to a frame index lives on that same axis,
-   so the warp table is threaded through the relocations below as well -- otherwise
-   a keyframe pinned at frame k stays at the old coordinate while the frame it was
-   pinning moves out from under it.
+3. PER-ROW STRENGTH LABELS. The list of noise-aug labels handed to
+   h3_row_aug_patch, one per condition BLOCK in layout order. Built here because
+   this is the only place that sees the final keyframe and reference lists
+   together.
+
+4. TIMED TEXT. Relocates spans of prompt text onto the video timeline. See the
+   notes on apply_text_beats below.
+
+5. TIME WARP. Rescales the target video's RoPE clock to dial motion up or down.
+   See h3_time_warp. Everything anchored to a frame index lives on that same
+   axis, so the warp table is threaded through the relocations below as well --
+   otherwise a keyframe pinned at frame k stays at the old coordinate while the
+   frame it was pinning moves out from under it.
+
+6. TIMELINE AUDIO (older layout only). Motion-context audio rides the reference
+   machinery and has its coordinates moved onto the target timeline. Current core
+   lets a keyframe carry audio directly, which does the same job with no patch,
+   so h3_studio builds it that way and this never runs. See relocate_context_audio.
 """
 
 import logging
@@ -32,9 +53,14 @@ import torch
 import comfy.ldm.minimax.model as _mmm
 import comfy.model_base as _mb
 
-from . import h3_time_warp
+from . import h3_core, h3_time_warp
 
 _orig_extra_conds = _mb.MiniMaxH3.extra_conds
+
+# A keyframe carrying only audio, whose window must END at a given pixel frame
+# and reach BACKWARDS from it (the motion-context join). The anchor is already
+# correct as built; this is only consulted when a time warp moves that frame.
+AUDIO_END_KEY = "h3_audio_end_frame"
 
 
 def _wf(warp, frame):
@@ -47,66 +73,157 @@ def _wf(warp, frame):
 def merge_cond_latents(payload):
     """Rebuild cond_video_latents as keyframes-then-refs, matching layout row order.
 
-    Returns True if a merge was needed. Only fires when both are present; with one or
-    the other, core's own assignment is already correct and is left untouched.
+    Returns True if a merge was needed. Only fires on the older layout and only
+    when both are present; with one or the other, core's own assignment is
+    already correct and is left untouched.
     """
+    if h3_core.merges_cond_latents():
+        return False
     keyframes = payload.get("keyframes")
     refs = payload.get("refs")
     if not keyframes or not refs:
         return False
+    # `if kf.get("latent") is not None` matches how the layout allocates rows:
+    # a keyframe with no picture contributes no visual condition block.
     payload["cond_video_latents"] = (
-        [kf["latent"] for kf in keyframes] +
+        [kf["latent"] for kf in keyframes if kf.get("latent") is not None] +
         [r["latent"] for r in refs if "latent" in r]
     )
     return True
 
 
-# --- 1b. keyframe re-anchoring when refs are present ------------------------
+# --- 2. keyframe anchoring --------------------------------------------------
 
 def _video_time_origin(layout):
-    """The t coordinate where the TARGET video grid actually starts.
-
-    Core anchors keyframe cond rows at text_len + FRAME_RESCALE*index, which is
-    only the video origin when there are no refs -- with refs, the target grid
-    starts at the post-refs cursor (each image ref advances it 1.0, audio by its
-    latent length, video by max(audio, video spans)). Core never combines
-    keyframes with refs, so its formula never had to care; our merge makes the
-    combination reachable, so the anchors must follow the real origin or first/
-    last pinning silently degrades into floating references (bug-hunt finding).
-    """
+    """The t coordinate where the TARGET video grid actually starts."""
     for a, b, kind in layout.segments:
         if kind == "video":
             return float(layout.position_ids[a, 0])
     return None
 
 
-def re_anchor_keyframes(layout, keyframes, warp=None):
-    """Re-write cond-segment time anchors relative to the true video origin.
+def _keyframe_segments(layout, keyframes):
+    """Pair each keyframe with the segments the layout built for it.
 
-    With no refs and no warp the origin equals text_len and this reproduces core's
-    own values exactly, so it is safe to run whenever keyframes exist. Returns the
-    number of segments moved.
+    PackedLayout walks the keyframe list in order, emitting a 'cond' segment for
+    a keyframe with a picture and a 'cond_audio' segment for one with audio (both,
+    in that order, for a keyframe with both). Reproducing that walk pairs them
+    exactly, including audio-only keyframes -- which a simple count of 'cond'
+    segments gets wrong, silently skipping every anchor.
+
+    Returns [(keyframe, cond_span_or_None, cond_audio_span_or_None)], or None if
+    the layout does not match the keyframe list (core drift: leave it alone).
+    """
+    conds = [(a, b) for a, b, kind in layout.segments if kind == "cond"]
+    cond_audios = [(a, b) for a, b, kind in layout.segments if kind == "cond_audio"]
+    want_v = sum(1 for kf in keyframes if kf.get("latent") is not None)
+    want_a = sum(1 for kf in keyframes if kf.get("audio_latent") is not None)
+    if len(conds) != want_v:
+        return None
+    if cond_audios and len(cond_audios) != want_a:
+        return None
+    out, vi, ai = [], 0, 0
+    for kf in keyframes:
+        v = a = None
+        if kf.get("latent") is not None:
+            v = conds[vi]
+            vi += 1
+        if kf.get("audio_latent") is not None and ai < len(cond_audios):
+            a = cond_audios[ai]
+            ai += 1
+        out.append((kf, v, a))
+    return out
+
+
+def re_anchor_keyframes(layout, keyframes, warp=None):
+    """Re-write keyframe time anchors relative to the true video origin.
+
+    With no refs and no warp this reproduces core's own values exactly, so it is
+    safe to run whenever keyframes exist. Returns the number of segments moved.
     """
     origin = _video_time_origin(layout)
     if origin is None:
         return 0
-    conds = [(a, b) for a, b, kind in layout.segments if kind == "cond"]
-    if len(conds) != len(keyframes):
+    pairs = _keyframe_segments(layout, keyframes)
+    if pairs is None:
         return 0  # layout shape drifted; leave core's values alone
-    for (a, b), kf in zip(conds, keyframes):
-        layout.position_ids[a:b, 0] = origin + _mmm.FRAME_RESCALE * _wf(
-            warp, kf["resolved_frame_index"])
-    return len(conds)
+    moved = 0
+    for kf, vspan, aspan in pairs:
+        cond_t = origin + _mmm.FRAME_RESCALE * _wf(warp, kf["resolved_frame_index"])
+        if vspan is not None:
+            moved += _translate(layout, vspan, cond_t)
+        if aspan is not None:
+            end = kf.get(AUDIO_END_KEY)
+            if end is None:
+                start = cond_t
+            else:
+                # a window pinned by its END: the join is a FRAME, so it follows
+                # the warp, but the window's WIDTH is a count of audio steps and
+                # does not (the waveform itself is not being rescaled)
+                rt = (aspan[1] - aspan[0]) // 2
+                start = origin + _mmm.FRAME_RESCALE * _wf(warp, end) - float(rt)
+            moved += _translate(layout, aspan, start)
+    return moved
 
 
-# --- 1c. motion-context audio: ref rows moved onto the clip's timeline ------
+def _translate(layout, span, new_start):
+    """Move a segment so its first row sits at new_start, keeping its shape.
+
+    Assignment would do for a single-frame keyframe -- all its rows share one t.
+    A keyframe carrying a CLIP does not: core spreads its latent steps along the
+    time axis, and flattening them to one coordinate would tell the model the
+    whole run happens in an instant. Translating preserves whatever internal
+    structure core built, for pictures and audio windows alike.
+    """
+    a, b = span
+    t = layout.position_ids[a:b, 0]
+    t += new_start - float(t[0])
+    return 1
+
+
+# --- 3. per-row strength labels ---------------------------------------------
+
+def _noise_aug_lists(payload):
+    """Per-block noise-aug labels in layout order, or (None, None).
+
+    Visual blocks are keyframes-then-refs; audio blocks are keyframe audio then
+    reference audio. Both must line up with core's cond_*_latents lists, so the
+    same 'has one' filters are used here.
+    """
+    kfs = payload.get("keyframes") or []
+    refs = payload.get("refs") or []
+    vis_kf = [k for k in kfs if k.get("latent") is not None]
+    vis_ref = [r for r in refs if "latent" in r]
+    aud_kf = [k for k in kfs if k.get("audio_latent") is not None]
+    aud_ref = [r for r in refs if r.get("audio_latent") is not None]
+
+    vid = None
+    if any("noise_aug" in e for e in vis_kf) or any("noise_aug" in e for e in vis_ref):
+        v = _mmm.VISUAL_COND_TIMESTEP
+        vid = ([float(e.get("noise_aug", v)) for e in vis_kf]
+               + [float(e.get("noise_aug", v)) for e in vis_ref])
+
+    aud = None
+    if any("audio_noise_aug" in e for e in aud_kf) or \
+            any("audio_noise_aug" in e for e in aud_ref):
+        a = _mmm.AUDIO_COND_TIMESTEP
+        aud = ([float(e.get("audio_noise_aug", a)) for e in aud_kf]
+               + [float(e.get("audio_noise_aug", a)) for e in aud_ref])
+    return vid, aud
+
+
+# --- 6. motion-context audio on the older layout ----------------------------
 
 MC_AUDIO_END_KEY = "minimax_mc_audio_end_frame"
 
 
 def relocate_context_audio(layout, refs, warp=None):
-    """Translate the motion-context audio ref's time coordinates onto the target
-    timeline, so its window ENDS where the pinned video ends (the join).
+    """Translate a marked audio reference onto the target timeline, so its window
+    ENDS where the pinned video ends (the join).
+
+    OLDER LAYOUT ONLY. Current core lets a keyframe carry audio anchored at its
+    own coordinate, so h3_studio builds the pinned sound that way instead and
+    nothing marks a reference any more.
 
     Refs and keyframes carry identical row machinery; what makes the model read
     a ref as "a separate clip to imitate" rather than "this clip, continued" is
@@ -115,14 +232,10 @@ def relocate_context_audio(layout, refs, warp=None):
     correlation 0.45 -> 0.95+ in ComfyUI-H3-Motion-Context's seam probe, whose
     finding this is).
 
-    Unlike their coordinate-range row selection, we select the marked ref's own
-    ref_audio SEGMENT (matched by audio-ref ordinal among the refs list, which
-    is the order segments are laid out in), so it coexists with any other
-    audio/video refs. Translation, not per-row assignment: += shift preserves
-    whatever intra-block structure core built. The ref still advances the
-    layout cursor, so its old slot is simply left vacant; the new window
-    [origin + FR*end - rt, origin + FR*end) always sits above the old slot's
-    start, so it can never collide with earlier refs' coordinate ranges.
+    We select the marked ref's own ref_audio SEGMENT (matched by audio-ref
+    ordinal among the refs list, which is the order segments are laid out in),
+    so it coexists with any other audio/video refs. Translation, not per-row
+    assignment: += shift preserves whatever intra-block structure core built.
 
     Guards log-and-skip: a failed relocation degrades to stock ref placement
     (imitation), never a broken render. Returns rows moved.
@@ -165,7 +278,7 @@ def relocate_context_audio(layout, refs, warp=None):
     return b - a
 
 
-# --- 2. timed text ---------------------------------------------------------
+# --- 4. timed text ---------------------------------------------------------
 
 def apply_text_beats(layout, beats, warp=None):
     """Relocate recorded text spans onto the video timeline. Returns spans moved.
@@ -219,16 +332,11 @@ def _patched_extra_conds(self, **kwargs):
 
     merge_cond_latents(payload)
 
-    # per-row noise-aug labels: rows are keyframes-then-refs, matching the
-    # cond_video_latents order (merged above, or core's own single-type
-    # assignment). Entries without a label default to the global value.
-    _kfs = payload.get("keyframes") or []
-    _refs = [r for r in (payload.get("refs") or []) if "latent" in r]
-    if any("noise_aug" in e for e in _kfs) or any("noise_aug" in e for e in _refs):
-        _v = _mmm.VISUAL_COND_TIMESTEP
-        payload["cond_video_noise_augs"] = (
-            [float(k.get("noise_aug", _v)) for k in _kfs]
-            + [float(r.get("noise_aug", _v)) for r in _refs])
+    vid_augs, aud_augs = _noise_aug_lists(payload)
+    if vid_augs is not None:
+        payload["cond_video_noise_augs"] = vid_augs
+    if aud_augs is not None:
+        payload["cond_audio_noise_augs"] = aud_augs
 
     layout0 = payload.get("layout")
     keyframes = payload.get("keyframes")
@@ -240,7 +348,9 @@ def _patched_extra_conds(self, **kwargs):
         warp = None
     elif warp:
         h3_time_warp.apply_video_warp(layout0, warp)
-    if layout0 is not None and keyframes:
+    # Core measures anchors from the post-refs cursor by itself, so re-anchoring
+    # is only work when the clock moved under them (or on the older layout).
+    if layout0 is not None and keyframes and (warp or not h3_core.anchors_after_refs()):
         re_anchor_keyframes(layout0, keyframes, warp)
     all_refs = payload.get("refs") or []
     if layout0 is not None and all_refs:
@@ -269,9 +379,10 @@ def install():
         return True
     if current is not _orig_extra_conds:
         logging.warning("H3Studio: MiniMaxH3.extra_conds was already replaced by "
-                        "another extension; reference+keyframe merging and timed-text "
-                        "anchoring are disabled.")
+                        "another extension; reference+keyframe merging, per-row "
+                        "strengths, timed text and motion timing are disabled.")
         return False
     _mb.MiniMaxH3.extra_conds = _patched_extra_conds
-    logging.info("H3Studio: extra_conds wrapped (ref/keyframe merge + timed text).")
+    h3_core.announce()
+    logging.info("H3Studio: extra_conds wrapped.")
     return True

@@ -25,6 +25,12 @@ Click the **beats lane** under the track at the right moment, type the text — 
 ### I want more (or less) motion, without changing what happens
 `motion_scale` on the node. Every other control describes what should happen; this one rescales the model's **clock** — the time it believes passes between frames — so the same content has to cover more or less movement. `1.0` is stock and leaves the timeline untouched, `1.3` is noticeably livelier, `0.7` calms a clip down. Stay near `0.8–1.3`; past that it drifts away from anything the model was trained on. For a clip that settles then accelerates, use `motion_curve` instead — `position, speed` per line, ramped between the points you give. The soundtrack is *not* rescaled, so picture and sound drift apart the further you go from `1.0`. EXPERIMENTAL.
 
+### I want a specific sound to happen at a specific moment
+`sound_anchors` on the node: `position, file` per line (`0.4, door-slam.wav`), or `position, strength, file` to make it a hint rather than a fixed event. The sound is pinned AT that frame and runs forward, so the model renders the picture that goes with it — a door slamming, a phone starting to ring, a line landing on a cut. Not the same as the reel's **fx lanes**, which mix a sample over the finished video: this one is a *condition* the model hears while rendering. Needs `audio_vae`, and a ComfyUI new enough to anchor audio at a frame (older builds skip it with a warning). Keep the files short — an anchored sound holds audio rows for its whole length. EXPERIMENTAL.
+
+### I want to know if my join actually worked
+**H3 Seam Probe**, inline between the audio VAE decode and the trim. Feed it this clip's UNTRIMMED audio, the audio of the clip it continues, and the frame count you pinned. `correlation` is the number to read: above `0.9` the model continued your actual waveform, around `0.5` it wrote a sound-alike — the failure that continuation exists to prevent, and one that's easy to miss by ear on a single join. It also reports lag in ms and whether the level or room tone steps at the cut. The audio output is the input unchanged, so it can stay wired in permanently.
+
 ### I want the same person in every clip
 Add their photos with **+ reference** (strength `1.0` locks identity, `0.7` = likeness hint). Then **🎭 cast** → **💾 save cast member** once — from any other clip or workflow, **🎭 cast** → add, and their refs, strengths and face-crops come back in one click.
 

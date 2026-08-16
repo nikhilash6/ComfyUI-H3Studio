@@ -336,7 +336,7 @@ const SETUP_FIELDS = [
     "motion_context_reuse_latent", "motion_context_anchor_brightness",
     "motion_context_strength",
     "mask_ref_pixels",
-    "motion_scale", "motion_curve",
+    "motion_scale", "motion_curve", "sound_anchors",
 ];
 
 // schema defaults: importSetup resets fields ABSENT from older setup files to
@@ -357,7 +357,7 @@ const SETUP_DEFAULTS = {
     motion_context_reuse_latent: true, motion_context_anchor_brightness: false,
     motion_context_strength: 0.92,
     mask_ref_pixels: false,
-    motion_scale: 1.0, motion_curve: "",
+    motion_scale: 1.0, motion_curve: "", sound_anchors: "",
 };
 
 const VIDEO_EXT = /\.(mp4|webm|mov|mkv|m4v|avi)(\s*\[\w+\])?\s*$/i;
@@ -462,6 +462,7 @@ const MIGRATE_DEFAULTS = {
     motion_context_reuse_latent: true,     // skips the VAE round trip per link
     motion_context_strength: 0.92,         // measured to stop artifacts compounding
     motion_scale: 1.0,                     // 1.0 leaves the RoPE clock untouched
+    sound_anchors: "",                     // empty = no anchored sound
 };
 
 function attachTimeline(node) {

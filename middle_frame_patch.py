@@ -33,24 +33,24 @@ source of truth for the other ~100 lines of packing logic.
 Stock first/last workflows never enter the patched path at all.
 """
 
-import inspect
 import logging
 
 import comfy.ldm.minimax.model as _mmm
 
-_CorePackedLayout = _mmm.PackedLayout
+from . import h3_core
+
+_CorePackedLayout = h3_core.CORE_PACKED_LAYOUT
 
 # Core dropped `frame_count` in the very commit that generalised the anchor formula,
 # so the two always move together: signature has it -> guard is still there.
-_CORE_TAKES_FRAME_COUNT = "frame_count" in inspect.signature(
-    _CorePackedLayout.__init__).parameters
+_CORE_TAKES_FRAME_COUNT = h3_core.takes_frame_count()
 
 _announced = False
 
 
 def core_supports_general_anchors():
     """True when core's own PackedLayout anchors a keyframe at any frame index."""
-    return not _CORE_TAKES_FRAME_COUNT
+    return h3_core.general_anchors()
 
 
 def general_cond_t(text_len, pixel_index):
