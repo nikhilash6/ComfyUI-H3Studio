@@ -1205,9 +1205,14 @@ class H3StudioImageToVideo(io.ComfyNode):
         mc_file = (motion_context_file or "").strip()
         mc_keyframes, mc_span = [], 0
         mc_audio_kf, mc_audio_ref = None, None
-        if mc_file and motion_context_reuse_latent:
-            # arm the session cache so THIS render's latent is kept for the
-            # NEXT link — capture stays idle until a chain is actually running
+        if motion_context_reuse_latent:
+            # Arm on EVERY render, not just ones that are already continuing.
+            # A chain's first link continues a clip that was rendered before any
+            # motion context existed, so arming only when mc_file is set captures
+            # nothing in time and link 1 always falls back to decoding the mp4 and
+            # re-encoding it -- the round trip this cache exists to remove, taken
+            # exactly where the join is most visible. Costs one CPU copy of the
+            # tail per render (a few MB, see KEEP_VIDEO_STEPS).
             if h3_latent_cache.install():
                 h3_latent_cache.arm()
         if mc_file:

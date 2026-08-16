@@ -52,12 +52,18 @@ KEEP_AUDIO_STEPS = 640
 
 
 def arm():
-    """Start capturing. Called by the Guide node when motion context is set."""
+    """Start capturing.
+
+    Called by the Guide node on every render that has latent reuse switched on,
+    whether or not THIS render is continuing anything -- the clip a chain starts
+    from is rendered before any motion context exists, so arming only once a
+    context is set would always miss it and send link 1 through the VAE.
+    """
     global _armed
     if not _armed:
         _armed = True
-        logging.info("H3Studio: latent cache armed — the next render's "
-                     "latent will be kept for the following continuation.")
+        logging.info("H3Studio: latent cache armed — this render's latent will "
+                     "be kept, so a continuation from it can skip the VAE.")
 
 
 _anchor = None          # the chain's intended brightness (0-1), or None
