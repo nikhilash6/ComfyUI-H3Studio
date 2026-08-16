@@ -3165,6 +3165,7 @@ function attachTimeline(node) {
         queueBtn.title = "queue the workflow without leaving the editor";
         // ---- run tracking: progress strip + live preview + result panel ----
         const run = { armed: false, pid: null, live: false, previewURL: null, mcSpan: 0,
+            mcTrim: 0,
             guideAt: 0, setup: null, replaceTarget: null, autoAdvanced: false,
             autoResult: null };
         // Auto Motion Mode: keep the chain going by itself — each finished
@@ -3309,22 +3310,24 @@ function attachTimeline(node) {
             showPanel("rendering…");
         };
         const showResult = (name, isVideo) => {
-            // The pinned span, plus the ONE transition frame after it.
+            // Where the delivered clip starts.
             //
-            // The pinned run ends on a latent-step boundary, so the first free
-            // step's opening frame is decoded with the pinned step as its
-            // temporal context and comes out at the CONTEXT's exposure, not the
+            // The frames just after a pinned head are unstable: the first free
+            // latent step is decoded with the pinned step as its temporal
+            // context, so it arrives at the CONTEXT's exposure rather than the
             // one the model settles on. Measured on two chains: last pinned
-            // 0.3105, first free 0.3067, next frame 0.2847 -- the transition
-            // frame sits with the head, then the picture steps.
+            // 0.3105, first free 0.3067, next frame 0.2847 -- which reads as a
+            // FLASH at the join, on top of a much less visible exposure step.
             //
-            // Trimming to the pinned span alone therefore opens every continued
-            // clip on that one hybrid frame, which reads as a FLASH at the join
-            // rather than the (much less visible) exposure step underneath it.
-            // Dropping it costs 1/24 s and turns a flash into a step. The in-trim
-            // is in seconds, so the audio follows it.
+            // Python answers this properly (safe tail bridge: it pins short of
+            // where the previous clip stops playing, so those instants come from
+            // the previous clip's own real frames and nothing is lost) and tells
+            // us the number during the run. The fallback below only applies when
+            // that message did not arrive -- it drops the unstable frame at the
+            // cost of 1/24 s. The in-trim is in seconds, so audio follows it.
             const renderedSpan = run.mcSpan;   // captured at queue time
-            const trimSpan = renderedSpan > 0 ? renderedSpan + 1 : 0;
+            const trimSpan = run.mcTrim > 0 ? run.mcTrim
+                : (renderedSpan > 0 ? renderedSpan + 1 : 0);
             const renderedAt = Number(run.guideAt) || 0;   // …and its song position
             stopVideosIn(resBody, true);
             stopDockMusic();
@@ -3501,7 +3504,8 @@ function attachTimeline(node) {
                 run.pid = null;
                 run.autoAdvanced = false;   // one auto-advance per run
                 run.autoResult = null;
-                run.mcSpan = mcSpanFrames();   // remember: this render repeats the context head
+                // estimates for this run; python overrides both if it has better numbers
+                run.mcSpan = mcSpanFrames(); run.mcTrim = 0;
                 run.guideAt = guideOffset() ?? 0;   // …and where in the song it was made
                 run.setup = captureSetupFields();   // the reel remembers how each clip was made
                 run.replaceTarget = state.reelTarget || null;   // armed by a card's ⚙
@@ -3751,7 +3755,7 @@ function attachTimeline(node) {
             if (run.armed) { run.pid = detail?.prompt_id ?? null; run.armed = false; }
             // queued outside our ▶ (ComfyUI's own button): estimate the context
             // span from the live widgets instead of trusting a stale capture
-            else { run.mcSpan = mcSpanFrames(); run.guideAt = guideOffset() ?? 0; }
+            else { run.mcSpan = mcSpanFrames(); run.mcTrim = 0; run.guideAt = guideOffset() ?? 0; }
         };
         const onProgress = ({ detail }) => {
             if (run.pid !== null && detail?.prompt_id && detail.prompt_id !== run.pid) return;
@@ -3841,7 +3845,9 @@ function attachTimeline(node) {
         // because the estimate would leave the extra repeated frames in the clip.
         const onHead = (e) => {
             const n = Number(e?.detail?.frames);
+            const t = Number(e?.detail?.trim);
             if (Number.isFinite(n) && n > 0) run.mcSpan = n;
+            if (Number.isFinite(t) && t > 0) run.mcTrim = t;
         };
         const apiEvents = [["execution_start", onExecStart], ["progress", onProgress],
             ["b_preview", onPreview], ["executed", onExecuted],
@@ -5647,7 +5653,7 @@ function attachTimeline(node) {
                 // re-roll is a retake, so re-queueing that setup verbatim
                 // continues from the same source the reject did
                 run.armed = true;
-                run.mcSpan = mcSpanFrames();
+                run.mcSpan = mcSpanFrames(); run.mcTrim = 0;
                 run.guideAt = guideOffset() ?? 0;
                 await app.queuePrompt(0);
                 toast("re-rolling — the new render will join the reel");

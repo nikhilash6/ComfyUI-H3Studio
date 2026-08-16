@@ -163,6 +163,17 @@ This is not the reel's fx lanes — those mix a sample over a finished video. Th
 one is a **condition**: the model hears it while rendering. Keep the files short,
 since an anchored sound holds audio rows for its whole length.
 
+Nothing is lost at the join, and nothing repeats. The frames immediately after a
+pinned head are unstable — the first free latent step is decoded using the pinned
+step as its temporal context, so it arrives at the *context's* exposure rather
+than the one the model settles on, which is what a flash at a cut actually is.
+Rather than drop them and lose the time, the pack stops **pinning** a couple of
+frames before the previous clip stops **playing**: those instants are shown from
+the previous clip's own real frames, the unstable ones are never delivered, and
+the join is frame-exact. Idea from
+[Herrgotts-H3-Infinite-Continuation-Suite](https://github.com/HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite)
+(Safe Tail Bridge).
+
 ### …build several clips hands-free
 Pick **Auto Motion Mode** in that same chooser and give it a clip count. It
 queues, adds to the reel, and continues from itself that many times, same prompt

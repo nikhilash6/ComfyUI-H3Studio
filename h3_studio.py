@@ -184,6 +184,24 @@ MC_ANCHOR_CLAMP = 0.08    # max brightness nudge per link (0-1 RGB scale)
 MC_NOISE_SEED_BASE = 700  # per-block seeds for sub-1.0 context strength
 MC_AUDIO_SEED = 760       # for sub-1.0 context strength on the pinned sound
 SOUND_ANCHOR_SEED_BASE = 770   # per-anchor seeds for sub-1.0 anchored sound
+
+# SAFE TAIL BRIDGE. The first frames after a pinned head are unstable: the first
+# free latent step is decoded with the pinned step as its temporal context, so it
+# comes out at the CONTEXT's exposure rather than the one the model settles on.
+# Dropping them fixes the flash but loses that much time from the piece.
+#
+# The fix is to stop PINNING before we stop DELIVERING. The previous clip's own
+# real frames cover the gap: pin up to frame (cut - BRIDGE), let the previous
+# clip play all the way to `cut` as it always did, and start the new clip at the
+# frame after `cut`. The unstable frames are never delivered, nothing is
+# duplicated, and no time is lost -- those instants are simply shown from the
+# clip that actually rendered them cleanly.
+#
+# Idea from Herrgotts-H3-Infinite-Continuation-Suite (Safe Tail Bridge). Theirs
+# blends real tail pixels into the next clip; ours needs no blending because the
+# reel already plays the previous clip up to its own out-trim, so the bridge is
+# a trim arithmetic change rather than an image operation.
+MC_BRIDGE_FRAMES = 2
 MC_FRAME_RESCALE = 5.0 / 3.0   # audio latent steps per pixel frame
 
 
@@ -278,7 +296,11 @@ def mc_slice_from_latent(entry, run, cut_frame):
     anything reaching further back than the buffer returns None and the caller
     re-encodes.
 
-    Returns (blocks, offsets, span) or None.
+    Returns (blocks, offsets, span, head_start, head_end) or None, where
+    head_start/head_end are the SOURCE pixel frames the pinned run covers --
+    the caller needs them to place the join, since the run no longer necessarily
+    ends where it was asked to (phase alignment and the safe-tail bridge both
+    move it).
     """
     lat = entry["video"]
     T = int(entry.get("t_total") or lat.shape[2])
@@ -309,12 +331,23 @@ def mc_slice_from_latent(entry, run, cut_frame):
     # is a repeat of the source anyway, and the alternative -- moving the handover
     # earlier instead -- would spend real footage from the previous clip.
     # (phase_aligned_extended in Herrgotts-H3-Infinite-Continuation-Suite.)
-    i0 = ((j - n_steps + 1) // 5) * 5
-    if i0 < base or i0 < 0 or j >= T:
+    # Of the two phase-0 boundaries either side of the ideal start, take whichever
+    # gives a run closest to the length asked for. Always rounding DOWN can cost a
+    # lot: at a handover two frames inside the clip the ideal start sits just past
+    # a boundary, and flooring reaches five steps further back -- 35 pinned frames
+    # where 22 were wanted, every one of them repeated footage at the head of the
+    # delivered clip. Rounding to the nearer boundary keeps it at 18.
+    ideal = j - n_steps + 1
+    cands = [c for c in (((ideal // 5) * 5), ((ideal // 5) * 5 + 5))
+             if 0 <= c <= j - 1]
+    if not cands:
+        return None
+    i0 = min(cands, key=lambda c: abs((ends[j] - starts[c] + 1) - run))
+    if i0 < base or j >= T:
         return None                    # outside the cached tail
     blocks = [lat[:, :, k - base:k - base + 1] for k in range(i0, j + 1)]
     offs = [starts[k] - starts[i0] for k in range(i0, j + 1)]
-    return blocks, offs, ends[j] - starts[i0] + 1
+    return blocks, offs, ends[j] - starts[i0] + 1, starts[i0], ends[j]
 
 
 def parse_ref_spec(spec, count, field="ref_spec"):
@@ -801,17 +834,20 @@ def flow_blend(z, a, seed):
     return a * z + (1.0 - a) * noise.to(z.device)
 
 
-def _announce_head(span):
-    """Tell the editor how many frames of this render actually repeat the source.
+def _announce_head(span, trim):
+    """Tell the editor where this render's delivered content actually starts.
 
-    Only needed when it differs from what the widgets imply -- a phase-extended
-    run. Best effort: headless, or a frontend that is not listening, simply
+    `span` is how many frames repeat the source; `trim` is where to cut, which is
+    further in by the safe-tail bridge. Neither is derivable from the widgets --
+    phase alignment and the bridge are both decided against the source at render
+    time. Best effort: headless, or a frontend that is not listening, simply
     misses it and falls back to its own estimate.
     """
     try:
         from server import PromptServer
 
-        PromptServer.instance.send_sync("h3studio.head", {"frames": int(span)})
+        PromptServer.instance.send_sync(
+            "h3studio.head", {"frames": int(span), "trim": int(trim)})
     except Exception:
         logging.debug("H3Studio: could not announce the head length",
                       exc_info=True)
@@ -1295,6 +1331,11 @@ class H3StudioImageToVideo(io.ComfyNode):
                         mc_file, at / FPS_HINT)
             except Exception:
                 logging.debug("H3Studio: freeze scan skipped", exc_info=True)
+            # Safe tail bridge: stop PINNING a couple of frames before the
+            # previous clip stops PLAYING, so its own real frames cover the
+            # unstable opening of this one. See MC_BRIDGE_FRAMES.
+            bridge = max(0, min(int(MC_BRIDGE_FRAMES), cut - run))
+            pin_cut = cut - bridge
             # Best case: this clip is the render we just made and its latent is
             # still in the session cache -- pin THAT instead of decoding the
             # file and re-encoding it. Skips a full VAE round trip per link,
@@ -1304,11 +1345,11 @@ class H3StudioImageToVideo(io.ComfyNode):
                 h3_latent_cache.install()
                 entry, why = h3_latent_cache.matches(mc_file, width, height)
                 if entry is not None:
-                    got = mc_slice_from_latent(entry, run, cut)
+                    got = mc_slice_from_latent(entry, run, pin_cut)
                     if got is None:
                         logging.info("H3Studio: cached latent can't serve a "
                                      "%d-frame run ending at frame %d — re-encoding.",
-                                     run, cut)
+                                     run, pin_cut)
                     else:
                         mc_cached = (entry, got)
                 else:
@@ -1323,7 +1364,7 @@ class H3StudioImageToVideo(io.ComfyNode):
                     "unless you have a reason not to.")
 
             if mc_cached is not None:
-                entry, (blocks, offsets, span) = mc_cached
+                entry, (blocks, offsets, span, head_start, head_end) = mc_cached
                 dev = comfy.model_management.intermediate_device()
                 # Brightness anchoring (optional): the pinned context is what
                 # the model matches, so correcting IT keeps the chain level --
@@ -1373,16 +1414,12 @@ class H3StudioImageToVideo(io.ComfyNode):
                         "handovers rarely land on one. The extra %.2fs is head "
                         "that gets trimmed, not lost content.",
                         run, span, (span - run) / FPS_HINT)
-                # The editor predicts the head trim from the widgets at QUEUE
-                # time, but the extension is only decidable here, against the
-                # cached latent's phase. Tell it, or it trims the requested run
-                # and leaves the rest of the repeated head in the delivered clip.
-                _announce_head(span)
             else:
                 # snap BEFORE slicing: encoding an off-grid count would make the VAE
                 # keep the FIRST covered frames of the slice, ending the pinned run
                 # early and shifting the join by the difference
-                tail = _resize(mc_frames[cut - run:cut], width, height, "disabled")
+                tail = _resize(mc_frames[pin_cut - run:pin_cut], width, height,
+                               "disabled")
                 enc = vae.encode(tail)
                 steps = int(enc.shape[2])
                 if mc_pixel_frames(steps) != run:
@@ -1394,6 +1431,25 @@ class H3StudioImageToVideo(io.ComfyNode):
                 mc_keyframes = [{"resolved_frame_index": offsets[k],
                                  "latent": enc[:, :, k:k + 1]} for k in range(steps)]
                 mc_span = run
+                # a fresh encode always starts on phase 0 and ends at the pin
+                head_start, head_end = pin_cut - run, pin_cut - 1
+
+            # Where the delivered clip starts: the frame straight after the last
+            # one the PREVIOUS clip plays. Everything between the pinned head and
+            # there is the bridge -- unstable frames of ours, covered by real
+            # frames of theirs.
+            mc_head_trim = int(cut - head_start)
+            if mc_head_trim > mc_span:
+                logging.info(
+                    "H3Studio: safe tail bridge — the previous clip plays its own "
+                    "%d real frame(s) after the pinned head, so this clip starts "
+                    "at frame %d and its unstable opening is never shown. No time "
+                    "is lost.", mc_head_trim - mc_span, mc_head_trim)
+            # The editor works the head trim out from the widgets at QUEUE time,
+            # but phase alignment and the bridge are only decidable here. Tell it,
+            # or it trims the requested run and leaves repeated (and unstable)
+            # frames at the start of the delivered clip.
+            _announce_head(mc_span, mc_head_trim)
 
             # audio context: the tail waveform ending at the SAME instant as the
             # pinned video, so both finish at the join. It rides the reference
@@ -1409,9 +1465,14 @@ class H3StudioImageToVideo(io.ComfyNode):
                 a_total = int(ent.get("a_total") or a_lat.shape[-1])
                 a_base = a_total - int(ent.get("a_kept") or a_lat.shape[-1])
                 rt_a = max(1, min(a_total, int(round(a_frames / FPS_HINT * 40.0))))
-                # global end step: the clip end, or the cut point when trimmed
-                end_g = a_total if cut >= ent["frames"] else \
-                    max(rt_a, min(a_total, int(round(cut / FPS_HINT * 40.0))))
+                # global end step: the pinned VIDEO's end, so both streams finish
+                # at the same instant. That is head_end + 1, not the delivery cut
+                # -- the bridge frames after it belong to the previous clip,
+                # picture and sound together.
+                a_end_frame = head_end + 1
+                end_g = a_total if a_end_frame >= ent["frames"] else \
+                    max(rt_a, min(a_total,
+                                  int(round(a_end_frame / FPS_HINT * 40.0))))
                 start_g = end_g - rt_a
                 if start_g < a_base:                       # older than the buffer
                     start_g, rt_a = a_base, end_g - a_base
@@ -1436,7 +1497,8 @@ class H3StudioImageToVideo(io.ComfyNode):
                         "to 0 to continue picture only.")
                 else:
                     sr = mc_snd["sample_rate"]
-                    a_end = int(round(cut / FPS_HINT * sr))
+                    # ends with the pinned picture, not at the delivery cut
+                    a_end = int(round((head_end + 1) / FPS_HINT * sr))
                     want = int(round(a_frames / FPS_HINT * sr))
                     wf = mc_snd["waveform"][..., max(0, a_end - want):a_end]
                     if wf.shape[-1] <= 0:
