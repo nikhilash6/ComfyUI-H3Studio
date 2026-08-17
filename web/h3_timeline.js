@@ -354,7 +354,7 @@ const SETUP_DEFAULTS = {
     motion_context_file: "", motion_context_end_seconds: 0.0,
     motion_context_frames: 22, motion_context_audio_frames: 22,
     v2v_noise: 0.0, v2v_noise_declare: 1.0,
-    motion_context_reuse_latent: true, motion_context_anchor_brightness: false,
+    motion_context_reuse_latent: true, motion_context_anchor_brightness: true,
     motion_context_strength: 0.92,
     mask_ref_pixels: false,
     motion_scale: 1.0, motion_curve: "", sound_anchors: "",
@@ -461,6 +461,7 @@ const LOCK_KEY = "h3studio.aspectLock";
 const MIGRATE_DEFAULTS = {
     motion_context_reuse_latent: true,     // skips the VAE round trip per link
     motion_context_strength: 0.92,         // measured to stop artifacts compounding
+    motion_context_anchor_brightness: true,  // keeps a chain from drifting off level
     motion_scale: 1.0,                     // 1.0 leaves the RoPE clock untouched
     sound_anchors: "",                     // empty = no anchored sound
 };
@@ -3757,7 +3758,8 @@ function attachTimeline(node) {
                     cursor: "pointer", whiteSpace: "nowrap" });
                 const autoFreeCb = el("input");
                 autoFreeCb.type = "checkbox";
-                autoFreeCb.checked = !!node.properties?.h3_auto_free;
+                // default ON: only an explicit opt-out turns it off
+                autoFreeCb.checked = node.properties?.h3_auto_free !== false;
                 autoFree.title = "unload models between clips (🧹) — slower, but the safest option if long chains hit VRAM faults on heavy renders. A failed clip retries once with a free regardless.";
                 autoFreeCb.addEventListener("change", () => {
                     node.properties = node.properties || {};
@@ -3845,8 +3847,9 @@ function attachTimeline(node) {
                 toast(`🔁 auto motion — clip added, ${auto.left} to go; next queue in a moment…`);
                 // settle window: VRAM paging and the caching allocator need a
                 // beat between heavy runs, and a human never queues this fast
-                const wait = node.properties?.h3_auto_free ? AUTO_RETRY_MS : AUTO_SETTLE_MS;
-                const pre = node.properties?.h3_auto_free
+                const autoFreeOn = node.properties?.h3_auto_free !== false;
+                const wait = autoFreeOn ? AUTO_RETRY_MS : AUTO_SETTLE_MS;
+                const pre = autoFreeOn
                     ? freeVram().catch(() => {}) : Promise.resolve();
                 pre.then(() => setTimeout(() => { if (auto.on) doQueue(); }, wait));
             } else {
@@ -7546,7 +7549,7 @@ function attachTimeline(node) {
                 // stay visible with no context set — you have to be able to
                 // arm them BEFORE the render that uses them
                 if (document.activeElement !== mcAnchorCb)
-                    mcAnchorCb.checked = !!widgetValue(node, "motion_context_anchor_brightness", false);
+                    mcAnchorCb.checked = widgetValue(node, "motion_context_anchor_brightness", true) !== false;
                 if (document.activeElement !== mcReuseCb)
                     mcReuseCb.checked = !!widgetValue(node, "motion_context_reuse_latent", true);
                 if (document.activeElement !== mcStr) {
