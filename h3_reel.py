@@ -129,6 +129,90 @@ def _predict(tr, k):
     return None if tr is None else tr[0] * k + tr[1]
 
 
+# Regional join correction.
+#
+# A whole-frame average hides the artifact that actually gets reported. Measured
+# on a chain whose join looked clean by every global measure:
+#
+#            f72      f73      step
+#     sky    0.5936   0.6057   +2.0%     <- "a flash of the sky"
+#     rest   0.3618   0.3597   -0.6%
+#     mean   0.4198   0.4212   +0.3%     <- all a global gain can see
+#
+# The sky steps up while everything else eases down, so the mean barely moves.
+# No single gain can fix that: correcting the sky by darkening the frame would
+# drag the road with it. So the correction is a low-resolution GAIN MAP, fitted
+# per region from the trend either side of the cut and interpolated smoothly
+# back to full resolution.
+#
+# It decays over about a second. A persistent regional gain would fight the shot
+# as content moves through the regions; a decaying one removes the step at the
+# cut and then lets the clip be itself.
+_GRID = (3, 4)          # rows, cols -- coarse on purpose, few frames to fit from
+_REGION_FRAMES = 24     # how long the regional correction takes to release
+
+
+def _tile_means(f, rows, cols):
+    """[T,H,W,C] -> [T, rows, cols] mean level per region."""
+    x = f.mean(dim=-1).unsqueeze(1)                     # [T,1,H,W]
+    return torch.nn.functional.adaptive_avg_pool2d(x, (rows, cols)).squeeze(1)
+
+
+def _tile_trend(f, a0, a1, rows, cols):
+    """Least-squares line per region over frames [a0,a1). -> (slope, intercept)."""
+    a0 = max(0, min(int(a0), f.shape[0] - 1))
+    a1 = min(int(a1), f.shape[0])
+    if a1 - a0 < 2:
+        return None
+    ys = _tile_means(f[a0:a1], rows, cols)              # [n, rows, cols]
+    n = ys.shape[0]
+    xs = torch.arange(a0, a1, dtype=torch.float32).view(n, 1, 1)
+    mx, my = xs.mean(), ys.mean(dim=0, keepdim=True)
+    den = ((xs - mx) ** 2).sum()
+    if float(den) <= 1e-9:
+        return None
+    slope = (((xs - mx) * (ys - my)).sum(dim=0) / den)
+    return slope, my.squeeze(0) - slope * float(mx)
+
+
+def _region_match(prev_f, next_f, frames=_REGION_FRAMES, lo=0.85, hi=1.18):
+    """Correct the incoming clip region by region, decaying to nothing.
+
+    Fixes a join whose discontinuity is local -- a sky that steps while the road
+    does not -- which a frame-mean correction cannot even detect. Export-time
+    only; the render file is untouched.
+    """
+    rows, cols = _GRID
+    if next_f.shape[0] < 3 or prev_f.shape[0] < 3:
+        return next_f
+    pt = _tile_trend(prev_f, prev_f.shape[0] - _PREV, prev_f.shape[0], rows, cols)
+    nt = _tile_trend(next_f, *_BODY, rows=rows, cols=cols)
+    if pt is None or nt is None:
+        return next_f
+    want = pt[0] * float(prev_f.shape[0]) + pt[1]       # prev, extrapolated to the cut
+    have = nt[1]                                        # next, at its own frame 0
+    ok = (want > 1e-3) & (have > 1e-3)
+    if not bool(ok.any()):
+        return next_f
+    gain = torch.where(ok, (want / have.clamp(min=1e-3)).clamp(lo, hi),
+                       torch.ones_like(have))
+    if float((gain - 1.0).abs().max()) < 5e-3:
+        return next_f                                    # nothing worth doing
+    gmap = torch.nn.functional.interpolate(
+        gain.view(1, 1, rows, cols),
+        size=(next_f.shape[1], next_f.shape[2]),
+        mode="bilinear", align_corners=False).view(1, next_f.shape[1],
+                                                   next_f.shape[2], 1)
+    n = min(frames, next_f.shape[0])
+    for k in range(n):
+        w = 1.0 - k / float(frames)
+        next_f[k] = (next_f[k] * (1.0 + (gmap[0] - 1.0) * w)).clamp(0.0, 1.0)
+    logging.info("H3Studio: join region-matched over %d frame(s), gain %.3f..%.3f "
+                 "across %dx%d regions", n, float(gain.min()), float(gain.max()),
+                 rows, cols)
+    return next_f
+
+
 def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
     """Whole-clip exposure anchor: ONE clamped constant gain putting this
     clip's level just after the join on its predecessor's closing level.
@@ -344,6 +428,9 @@ def register():
                 out_a = torch.cat([out_a[..., :-xs], a_bl, a[..., xs:]], dim=-1)
             else:
                 if p.get("lumafix"):
+                    # frame-mean first (the whole-clip step), then the regional
+                    # residue a mean cannot see, then the head transient
+                    f = _region_match(out_f, f)
                     f = _luma_match(f)
                 _declick(out_a, sr, tail=True)
                 _declick(a, sr, head=True)

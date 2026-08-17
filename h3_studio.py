@@ -1374,38 +1374,8 @@ class H3StudioImageToVideo(io.ComfyNode):
             if mc_cached is not None:
                 entry, (blocks, offsets, span, head_start, head_end) = mc_cached
                 dev = comfy.model_management.intermediate_device()
-                # Brightness anchoring (optional): the pinned context is what
-                # the model matches, so correcting IT keeps the chain level --
-                # no gain on finished pixels, no VAE, and no assumption about
-                # how much any given link drifts. Closed loop: measure what the
-                # last render actually came out at, push the error into the
-                # context we hand over. A partly-followed nudge just means a
-                # slightly larger correction next link, so it converges instead
-                # of accumulating.
-                mc_shift = 0.0
-                if motion_context_anchor_brightness:
-                    a = h3_latent_cache.anchor_get()
-                    r = entry.get("luma")
-                    if r is not None and a is None:
-                        h3_latent_cache.anchor_set(r, "first link of this chain")
-                    elif r is not None:
-                        err = a - r
-                        lim = float(MC_ANCHOR_CLAMP)
-                        mc_shift = max(-lim, min(lim, err))
-                        if abs(err) > lim:
-                            logging.info("H3Studio: brightness error %.4f "
-                                         "exceeds the +-%.2f clamp — correcting "
-                                         "what's safe; a real lighting change "
-                                         "will simply re-anchor if you clear the "
-                                         "reel.", err, lim)
-                        if abs(mc_shift) > 1e-4:
-                            logging.info("H3Studio: brightness anchor — last "
-                                         "render sat at %.4f vs anchor %.4f, "
-                                         "nudging the pinned context %+.4f.",
-                                         r, a, mc_shift)
                 mc_keyframes = [{"resolved_frame_index": offsets[k],
-                                 "latent": h3_latent_cache.shift_latent_luma(
-                                     blocks[k], mc_shift).to(dev)}
+                                 "latent": blocks[k].to(dev)}
                                 for k in range(len(blocks))]
                 mc_span = span
                 logging.info("H3Studio: motion context taken straight from "
@@ -1441,6 +1411,76 @@ class H3StudioImageToVideo(io.ComfyNode):
                 mc_span = run
                 # a fresh encode always starts on phase 0 and ends at the pin
                 head_start, head_end = pin_cut - run, pin_cut - 1
+
+            # BRIGHTNESS ANCHORING (optional), measured off the RENDERED PIXELS.
+            #
+            # The pinned context is what the model matches, so correcting IT
+            # keeps a chain level -- no gain on finished pixels, no VAE, and no
+            # assumption about how much any given link drifts. Closed loop:
+            # measure what the previous render actually came out at, push the
+            # error into the context we hand over. A partly-followed nudge means
+            # a slightly larger correction next link, so it converges.
+            #
+            # Measured in PIXELS, off the file we already decoded for the freeze
+            # scan. It used to read the cached latent through comfy's preview
+            # map, which had two problems: a cache miss (any re-roll) left it
+            # undefined so the whole feature silently did nothing, and the map is
+            # a linear approximation whose absolute value is not a brightness at
+            # all -- only differences through it mean anything.
+            #
+            # NOT a calibration of the latent against its own pixels. That looks
+            # tempting and is wrong: the pinned latent already decodes to the
+            # source, so any gap between its predicted and true level IS the
+            # map's error, and "correcting" it would double that error rather
+            # than remove it. Both terms here are pixel measurements, so the
+            # map's offset cancels and only its slope is trusted -- which is what
+            # `unit` is solved for.
+            #
+            # Regional, because the drift that actually shows is: a sky that
+            # steps while the road does not moves the frame mean barely at all.
+            if motion_context_anchor_brightness and mc_keyframes:
+                win = mc_frames[head_start:head_end + 1]
+                lvl = h3_latent_cache.frame_luma(win)
+                lat = mc_keyframes[0]["latent"]
+                grid = h3_latent_cache.frame_luma_grid(
+                    win, int(lat.shape[-2]), int(lat.shape[-1]))
+                a = h3_latent_cache.anchor_get()
+                ag = h3_latent_cache.anchor_grid_get()
+                if lvl is None:
+                    pass
+                elif a is None:
+                    h3_latent_cache.anchor_set(lvl, "first link of this chain",
+                                               grid)
+                else:
+                    lim = float(MC_ANCHOR_CLAMP)
+                    err = a - lvl
+                    shift = max(-lim, min(lim, err))
+                    dmap = None
+                    if ag is not None and grid is not None and ag.shape == grid.shape:
+                        dmap = (ag - grid).clamp(-lim, lim)
+                    if abs(err) > lim:
+                        logging.info("H3Studio: brightness error %.4f exceeds "
+                                     "the +-%.2f clamp — correcting what's safe; "
+                                     "a real lighting change re-anchors when you "
+                                     "clear the reel.", err, lim)
+                    if dmap is not None and float(dmap.abs().max()) > 1e-4:
+                        for kf in mc_keyframes:
+                            kf["latent"] = h3_latent_cache.shift_latent_luma_grid(
+                                kf["latent"], dmap)
+                        logging.info(
+                            "H3Studio: brightness anchor — the previous render "
+                            "sat at %.4f vs anchor %.4f; pinned context nudged "
+                            "%+.4f mean, %+.4f..%+.4f across regions (measured "
+                            "in pixels).", lvl, a, shift,
+                            float(dmap.min()), float(dmap.max()))
+                    elif abs(shift) > 1e-4:
+                        for kf in mc_keyframes:
+                            kf["latent"] = h3_latent_cache.shift_latent_luma(
+                                kf["latent"], shift)
+                        logging.info(
+                            "H3Studio: brightness anchor — the previous render "
+                            "sat at %.4f vs anchor %.4f, nudging the pinned "
+                            "context %+.4f (measured in pixels).", lvl, a, shift)
 
             # Where the delivered clip starts: straight after the pinned head.
             # Its first frame is the unstable one; the reel corrects its level

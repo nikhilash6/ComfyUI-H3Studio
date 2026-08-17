@@ -67,18 +67,31 @@ def arm():
                      "be kept, so a continuation from it can skip the VAE.")
 
 
-_anchor = None          # the chain's intended brightness (0-1), or None
+# The chain's intended brightness, measured in PIXELS off the rendered files --
+# ground truth, and available whether or not the latent cache hit. It used to be
+# read from the cached latent through the preview map, which meant a re-roll (or
+# any cache miss) left it undefined and the whole correction silently did
+# nothing. Optionally a [h,w] map alongside the scalar, since the drift that
+# actually shows is regional.
+_anchor = None          # float, 0-1
+_anchor_grid = None     # torch [h,w] 0-1, or None
 
 
 def anchor_get():
     return _anchor
 
 
-def anchor_set(level, why=""):
-    global _anchor
+def anchor_grid_get():
+    return _anchor_grid
+
+
+def anchor_set(level, why="", grid=None):
+    global _anchor, _anchor_grid
     _anchor = None if level is None else float(level)
-    logging.info("H3Studio: chain brightness anchor %s%s",
+    _anchor_grid = None if level is None else grid
+    logging.info("H3Studio: chain brightness anchor %s%s%s",
                  "cleared" if level is None else "set to %.4f" % level,
+                 "" if grid is None else " (+%dx%d regions)" % tuple(grid.shape),
                  (" (%s)" % why) if why else "")
 
 
@@ -131,7 +144,13 @@ def _luma_basis():
 
 
 def latent_luma(video_lat):
-    """Predicted mean brightness (0-1 RGB scale) of a video latent."""
+    """Predicted mean brightness of a video latent, on comfy's preview map.
+
+    NOT a true 0-1 brightness: the map is a linear approximation of the decoder,
+    so this is a projection. Use it only for DIFFERENCES between two latents
+    measured the same way -- the map's offset cancels there. To compare against
+    real pixels, measure both sides in pixels (see frame_luma).
+    """
     b = _luma_basis()
     if not b:
         return None
@@ -140,6 +159,49 @@ def latent_luma(video_lat):
     # mean over batch/time/space -> [24], then through the preview map
     per_ch = v.mean(dim=(0, 2, 3, 4)) if v.ndim == 5 else v.mean(dim=(0, 2, 3))
     return float((per_ch @ M).mean())
+
+
+def frame_luma(frames):
+    """True mean brightness (0-1) of decoded frames [T,H,W,C]. Ground truth."""
+    if frames is None or frames.shape[0] == 0:
+        return None
+    return float(frames[..., :3].to(torch.float32).mean())
+
+
+def frame_luma_grid(frames, h, w):
+    """True brightness per latent cell: [T,H,W,C] -> [h, w], 0-1. Ground truth.
+
+    The visible failure at a join is regional -- a sky that steps while the road
+    does not -- so a single number cannot express the correction. A latent cell
+    covers 16x16 pixels, which is finer than any exposure difference worth
+    chasing.
+    """
+    if frames is None or frames.shape[0] == 0:
+        return None
+    x = frames[..., :3].to(torch.float32).mean(dim=-1)      # [T,H,W]
+    x = x.mean(dim=0, keepdim=True).unsqueeze(1)            # [1,1,H,W]
+    return torch.nn.functional.adaptive_avg_pool2d(x, (h, w))[0, 0]
+
+
+def shift_latent_luma_grid(video_lat, delta_map):
+    """Shift a latent so its predicted brightness moves by delta_map, per cell.
+
+    `delta_map` is [h, w] in 0-1 brightness units, matching the latent's spatial
+    grid. Same basis as shift_latent_luma; this one just varies across frame.
+    """
+    b = _luma_basis()
+    if not b or delta_map is None:
+        return video_lat
+    unit, _ = b
+    d = delta_map.to(video_lat.device, video_lat.dtype)
+    if video_lat.ndim == 5:                                  # [B,24,T,h,w]
+        if d.shape != video_lat.shape[-2:]:
+            d = torch.nn.functional.interpolate(
+                d[None, None], size=video_lat.shape[-2:],
+                mode="bilinear", align_corners=False)[0, 0]
+        u = unit.to(video_lat.device, video_lat.dtype).view(1, -1, 1, 1, 1)
+        return video_lat + u * d.view(1, 1, 1, *d.shape)
+    return video_lat
 
 
 def shift_latent_luma(video_lat, delta):
