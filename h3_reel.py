@@ -92,13 +92,41 @@ def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
 _BODY = (2, 10)
 
 
-def _body_level(f):
-    """This clip's level just after its unstable head, or None if too short."""
-    a0, a1 = min(_BODY[0], max(0, f.shape[0] - 1)), min(_BODY[1], f.shape[0])
-    if a1 <= a0:
+_PREV = 8        # frames of the outgoing clip used to read where it was heading
+
+
+def _trend(f, a0, a1):
+    """Least-squares line through the mean level of frames [a0, a1).
+
+    A single average is not enough. These corrections compared against a flat
+    mean, which is right only while the exposure is steady; on a shot that is
+    genuinely changing -- measured on a chain falling ~3% per frame as it went
+    into shade -- a flat target pulls the opening frames off the trend and turns
+    a smooth decline into a dip-then-rise. That wobble is what reads as a flash,
+    and it was the correction making it, not the render.
+
+    Returns (slope, intercept) in frame units, or None when there is too little
+    to fit.
+    """
+    a0 = max(0, min(int(a0), f.shape[0] - 1))
+    a1 = min(int(a1), f.shape[0])
+    n = a1 - a0
+    if n < 2:
         return None
-    v = float(f[a0:a1].mean())
-    return v if v > 1e-4 else None
+    ys = [float(f[k].mean()) for k in range(a0, a1)]
+    if min(ys) <= 1e-4:
+        return None
+    xs = list(range(a0, a1))
+    mx, my = sum(xs) / n, sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    if den <= 1e-9:
+        return None
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+    return slope, my - slope * mx
+
+
+def _predict(tr, k):
+    return None if tr is None else tr[0] * k + tr[1]
 
 
 def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
@@ -117,9 +145,16 @@ def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
 
     Opt-in per clip (the trim popup's brightness checkbox), export-only.
     """
-    anchor = float(prev_f[-4:].mean())
-    settled = _body_level(next_f)
-    if settled is None or anchor <= 1e-4:
+    # Both sides extrapolated TO THE CUT, so a shot that is already changing
+    # carries its change across the join rather than being flattened onto the
+    # previous clip's closing average -- which on a fast-darkening shot turned a
+    # -5.8% join step into +10.3% by insisting the new clip start where the old
+    # one was, not where it was heading.
+    pt = _trend(prev_f, prev_f.shape[0] - _PREV, prev_f.shape[0])
+    nt = _trend(next_f, *_BODY)
+    anchor = _predict(pt, prev_f.shape[0])       # where the outgoing clip was going
+    settled = _predict(nt, 0)                    # where the incoming clip comes in
+    if anchor is None or settled is None or anchor <= 1e-4 or settled <= 1e-4:
         return next_f
     g = max(lo, min(hi, anchor / settled))
     if abs(g - 1.0) > 1e-3:
@@ -158,15 +193,16 @@ def _luma_match(next_f, frames=6, lo=0.82, hi=1.22):
     Export-time only; the render file is untouched.
     """
     n = next_f.shape[0]
-    settled = _body_level(next_f)
-    if settled is None:
+    tr = _trend(next_f, *_BODY)
+    if tr is None:
         return next_f
     gains = []
     for k in range(min(frames, n)):
         mk = float(next_f[k].mean())
-        if mk <= 1e-4:
+        want = _predict(tr, k)          # where this frame should sit on the trend
+        if mk <= 1e-4 or want is None or want <= 1e-4:
             continue
-        g = max(lo, min(hi, settled / mk))
+        g = max(lo, min(hi, want / mk))
         w = 1.0 - k / float(frames)
         gk = 1.0 + (g - 1.0) * w
         if abs(gk - 1.0) < 1e-3:
