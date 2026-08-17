@@ -76,10 +76,34 @@ def _clip_audio(audio, start_frames, n_frames, fps, sr, channels):
     return wf
 
 
+# The window both corrections read as "what this clip actually looks like":
+# past the unstable head, but still ADJACENT TO THE JOIN.
+#
+# It used to be frames 12-36, which breaks on any clip whose exposure moves
+# during it. Measured on a real chain: the clip's own level fell 0.516 -> 0.310
+# from end to end (the shot going into shade -- content, not drift), so its
+# middle read 12.6% darker than the previous clip's close and the whole clip was
+# brightened to compensate. The opening had matched perfectly beforehand, so the
+# correction created the very step it exists to remove, and the decay of the
+# second correction on top became a visible brighten ramp -- reported as "a
+# little flash of the sky".
+#
+# Continuity is a property of the frames either side of the cut. Measure there.
+_BODY = (2, 10)
+
+
+def _body_level(f):
+    """This clip's level just after its unstable head, or None if too short."""
+    a0, a1 = min(_BODY[0], max(0, f.shape[0] - 1)), min(_BODY[1], f.shape[0])
+    if a1 <= a0:
+        return None
+    v = float(f[a0:a1].mean())
+    return v if v > 1e-4 else None
+
+
 def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
     """Whole-clip exposure anchor: ONE clamped constant gain putting this
-    clip's settled level (frames 12-36, past the join zigzag) on its
-    predecessor's closing level.
+    clip's level just after the join on its predecessor's closing level.
 
     Measured across Peter's chained renders, every continuation came out
     darker than its source -- typically 1-3% per link, worst 8% -- which
@@ -94,12 +118,8 @@ def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
     Opt-in per clip (the trim popup's brightness checkbox), export-only.
     """
     anchor = float(prev_f[-4:].mean())
-    a0 = min(12, max(0, next_f.shape[0] - 1))
-    a1 = min(36, next_f.shape[0])
-    if a1 <= a0 or anchor <= 1e-4:
-        return next_f
-    settled = float(next_f[a0:a1].mean())
-    if settled <= 1e-4:
+    settled = _body_level(next_f)
+    if settled is None or anchor <= 1e-4:
         return next_f
     g = max(lo, min(hi, anchor / settled))
     if abs(g - 1.0) > 1e-3:
@@ -110,40 +130,53 @@ def _level_match(prev_f, next_f, lo=0.80, hi=1.25):
     return next_f
 
 
-def _luma_match(prev_f, next_f, frames=4, lo=0.82, hi=1.22):
-    """Flatten the brightness zigzag at a motion-continuation join.
+def _luma_match(next_f, frames=6, lo=0.82, hi=1.22):
+    """Flatten a continued clip's opening onto ITS OWN settled level.
 
     The first delivered frame after a pinned context block carries the CONTEXT's
     exposure rather than the one the model settles on -- the first free latent
     step is decoded using the pinned step as its temporal context. Measured on a
     real chain: last pinned 0.3105, first delivered 0.3067, next frame 0.2847.
-    One frame out of step, which on a hard cut reads as a flash.
+    One frame out of step with the rest of its own clip, which on a hard cut
+    reads as a flash.
 
-    Gain-correct next_f's opening frames toward the previous clip's closing
-    level, decaying linearly to zero so a legitimate lighting change survives.
+    THE TARGET IS THIS CLIP'S BODY, not the previous clip's tail. That split
+    matters: _level_match already puts this clip's body on the previous clip's
+    closing level, so aiming here at the previous clip too corrects the same
+    error twice, and the second correction's decay becomes a visible brighten
+    ramp over the following frames -- reported as "a little flash of the sky",
+    measured as +11% over four frames after the join. Two orthogonal jobs:
 
-    The window is deliberately SHORT. It is one frame that is wrong, and
-    correcting over half a second instead visibly drags the following frames --
-    the brightness drift that Herrgotts-H3-Infinite-Continuation-Suite hit and
-    documented when it tried the same approach.
+        _level_match   this clip's BODY  -> the previous clip   (chain drift)
+        _luma_match    this clip's HEAD  -> this clip's body    (the flash)
+
+    A frame already sitting on the settled level gets a gain of 1.0 whatever the
+    window, so the window only bounds how far in we are willing to reach; it
+    cannot drag correct frames the way a fixed decay toward an external anchor
+    does.
 
     Export-time only; the render file is untouched.
     """
-    anchor = float(prev_f[-4:].mean())
-    n = min(frames, next_f.shape[0])
+    n = next_f.shape[0]
+    settled = _body_level(next_f)
+    if settled is None:
+        return next_f
     gains = []
-    for k in range(n):
+    for k in range(min(frames, n)):
         mk = float(next_f[k].mean())
-        if mk <= 1e-4 or anchor <= 1e-4:
+        if mk <= 1e-4:
             continue
-        g = max(lo, min(hi, anchor / mk))
+        g = max(lo, min(hi, settled / mk))
         w = 1.0 - k / float(frames)
         gk = 1.0 + (g - 1.0) * w
+        if abs(gk - 1.0) < 1e-3:
+            continue
         next_f[k] = (next_f[k] * gk).clamp(0.0, 1.0)
         gains.append(gk)
     if gains:
         logging.info("H3Studio: reel join luma-matched over %d frame(s), "
-                     "gain %.3f..%.3f", len(gains), min(gains), max(gains))
+                     "gain %.3f..%.3f (onto this clip's own settled level)",
+                     len(gains), min(gains), max(gains))
     return next_f
 
 
@@ -275,7 +308,7 @@ def register():
                 out_a = torch.cat([out_a[..., :-xs], a_bl, a[..., xs:]], dim=-1)
             else:
                 if p.get("lumafix"):
-                    f = _luma_match(out_f, f)
+                    f = _luma_match(f)
                 _declick(out_a, sr, tail=True)
                 _declick(a, sr, head=True)
                 out_f = torch.cat([out_f, f], dim=0)
