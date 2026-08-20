@@ -3062,6 +3062,23 @@ function attachTimeline(node) {
                     JSON.stringify({ on: dimLock, ratio: lockRatio }));
             } catch (e) { /* private mode */ }
         };
+        // the remembered ratio is only trustworthy while it still describes
+        // what's on screen. An aspect preset, "match aspect", the framing tool
+        // or simply opening a workflow whose dims differ from last session can
+        // leave a landscape ratio locked over a portrait frame -- and then the
+        // first number you type derives the other axis from it and inverts the
+        // whole aspect. Re-capture whenever the live dims have drifted further
+        // than the 32px grid alone could explain (16px of slack per axis).
+        const syncLockRatio = () => {
+            const [w, h] = outWH();
+            if (!(w > 0 && h > 0)) return;
+            const live = w / h;
+            const tol = 16 / w + 16 / h + 1e-6;
+            if (!(lockRatio > 0) || Math.abs(live / lockRatio - 1) > tol) {
+                lockRatio = live;
+                saveLock();
+            }
+        };
         lockBtn.addEventListener("click", () => {
             dimLock = !dimLock;
             const [w, h] = outWH();
@@ -3086,6 +3103,7 @@ function attachTimeline(node) {
             w = isFinite(w) ? r32(w) : curW;
             h = isFinite(h) ? r32(h) : curH;
             if (dimLock) {
+                syncLockRatio();   // never derive from a ratio the frame outgrew
                 if (w !== curW && h === curH) h = r32(w / lockRatio);
                 else if (h !== curH) w = r32(h * lockRatio);
             }
@@ -3147,6 +3165,7 @@ function attachTimeline(node) {
             const h = snap32(Math.sqrt(area / r));
             setWidget("width", w);
             setWidget("height", h);
+            if (dimLock) { lockRatio = r; saveLock(); }   // the lock follows the preset
             saveRes();
             refresh(true);
         });
@@ -4071,6 +4090,7 @@ function attachTimeline(node) {
             const h = snap32(Math.sqrt(area / r));
             setWidget("width", w);
             setWidget("height", h);
+            if (dimLock) { lockRatio = r; saveLock(); }   // the lock follows the footage
             saveRes();
             refresh(true);
             toast(`canvas matched to the footage: ${w}×${h} (${meta.w}:${meta.h} source)`);
